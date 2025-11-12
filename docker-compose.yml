@@ -101,6 +101,7 @@ services:
       API_JWT_SECRET: ${SUPABASE_JWT_SECRET}
       SECRET_KEY_BASE: ${SUPABASE_JWT_SECRET}
       FLY_POSTGRES_HOST: db
+      APP_NAME: supabase_realtime
       REPLICATION_MODE: RLS
     ports:
       - "${SUPABASE_REALTIME_PORT:-54328}:4000"
