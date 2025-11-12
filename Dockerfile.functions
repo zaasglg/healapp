@@ -1,0 +1,10 @@
+FROM supabase/edge-runtime:v1.43.2
+
+# Копируем Edge Functions в образ
+COPY supabase/functions /home/deno/functions
+
+# Убеждаемся, что директория существует
+RUN mkdir -p /home/deno/functions
+
+WORKDIR /home/deno
+

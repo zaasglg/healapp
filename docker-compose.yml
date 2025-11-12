@@ -153,7 +153,9 @@ services:
   #     IMGPROXY_MAX_ANIMATION_FRAMES: 30
 
   functions:
-    image: supabase/edge-runtime:v1.43.2
+    build:
+      context: .
+      dockerfile: Dockerfile.functions
     restart: unless-stopped
     command: start
     depends_on:
@@ -170,8 +172,6 @@ services:
       JWT_SECRET: ${SUPABASE_JWT_SECRET}
     ports:
       - "${SUPABASE_FUNCTIONS_PORT:-54325}:9000"
-    # volumes не используются из-за ограничений Timeweb Cloud
-    # Функции будут скопированы в контейнер через init скрипт
 
   studio:
     image: supabase/studio:latest
