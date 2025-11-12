@@ -151,8 +151,8 @@ services:
   #     IMGPROXY_ENABLE_WEBP_DETECTION: "true"
   #     IMGPROXY_MAX_ANIMATION_FRAMES: 30
 
-  # functions временно отключен - требует volumes для Edge Functions
-  # Для работы функций нужно задеплоить их через Supabase CLI
+  # Edge Functions временно отключены - требуют volumes
+  # Для работы нужно задеплоить их через Supabase CLI
 
   studio:
     image: supabase/studio:latest
@@ -203,7 +203,7 @@ services:
   # - REST: порт 3000
   # - Realtime: порт 4000
   # - Storage: порт 5000
-  # - Functions: порт 9000
+  # - Edge Functions: порт 9000 (отключен)
   # 
   # Для внешнего доступа нужно будет настроить reverse proxy или использовать прямые порты
   # kong:
