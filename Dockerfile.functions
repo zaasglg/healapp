@@ -1,13 +1,17 @@
 FROM supabase/edge-runtime:v1.43.2
 
-# Официальный Supabase использует /home/deno/functions для Edge Functions
-# Копируем функции в образ
-COPY supabase/functions/ /home/deno/functions/
+# Копируем функции в /var/functions, чтобы избежать конфликта с build context
+# который монтирует весь проект в /home/deno
+COPY supabase/functions/ /var/functions/
+
+# Копируем entrypoint скрипт
+COPY scripts/entrypoint-functions.sh /var/functions-entrypoint.sh
+RUN chmod +x /var/functions-entrypoint.sh
 
 # Проверяем что скопировалось
-RUN ls -la /home/deno/functions/ && \
-    ls -la /home/deno/functions/accept-invite/ && \
-    test -f /home/deno/functions/accept-invite/index.ts && echo "✅ Functions copied successfully" || (echo "❌ Functions not found" && find /home/deno -type f)
+RUN ls -la /var/functions/ && \
+    ls -la /var/functions/accept-invite/ && \
+    test -f /var/functions/accept-invite/index.ts && echo "✅ Functions copied successfully" || (echo "❌ Functions not found" && find /var -name "*.ts" -type f)
 
 # Устанавливаем WORKDIR (Edge Runtime ожидает /home/deno)
 WORKDIR /home/deno

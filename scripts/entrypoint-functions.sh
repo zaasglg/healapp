@@ -1,21 +1,18 @@
 #!/bin/sh
 set -e
 
-# Копируем функции из образа в рабочую директорию, если их там нет
-if [ ! -d "/home/deno/functions" ]; then
-  echo "Functions directory not found, creating..."
-  mkdir -p /home/deno/functions
+# Проверяем наличие функций в /var/functions (скопированы в образ)
+if [ ! -d "/var/functions" ] || [ ! -f "/var/functions/accept-invite/index.ts" ]; then
+  echo "❌ ERROR: Functions not found in /var/functions"
+  echo "Available files:"
+  find /var -type f 2>/dev/null | head -10 || echo "No files found in /var"
+  exit 1
 fi
 
-# Если функции не скопированы, копируем из образа
-if [ ! -f "/home/deno/functions/accept-invite/index.ts" ]; then
-  echo "Functions not found in working directory, checking image..."
-  # Функции должны быть в образе, но если их нет - это проблема сборки
-  if [ -d "/tmp/functions-backup" ]; then
-    cp -r /tmp/functions-backup/* /home/deno/functions/ 2>/dev/null || true
-  fi
-fi
+echo "✅ Functions found in /var/functions"
+ls -la /var/functions/
 
-# Запускаем Edge Runtime
-exec edge-runtime start
+# Запускаем Edge Runtime с указанием пути к функциям
+# --main-service указывает путь к директории с функциями
+exec edge-runtime start --main-service /var/functions --verbose
 

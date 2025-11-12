@@ -157,7 +157,7 @@ services:
       context: .
       dockerfile: Dockerfile.functions
     restart: unless-stopped
-    # Entrypoint скрипт уже установлен в Dockerfile
+    entrypoint: ["/bin/sh", "/var/functions-entrypoint.sh"]
     init: true
     depends_on:
       db:
