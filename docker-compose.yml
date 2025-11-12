@@ -1,4 +1,4 @@
-version: "3.9"
+# version: "3.9"
 
 x-common-env: &common-env
   JWT_SECRET: ${SUPABASE_JWT_SECRET}
@@ -99,6 +99,7 @@ services:
       PORT: 4000
       SECURE_CHANNELS: "true"
       API_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      SECRET_KEY_BASE: ${SUPABASE_JWT_SECRET}
       FLY_POSTGRES_HOST: db
       REPLICATION_MODE: RLS
     ports:
@@ -152,6 +153,7 @@ services:
   functions:
     image: supabase/edge-runtime:v1.43.2
     restart: unless-stopped
+    command: start 
     depends_on:
       db:
         condition: service_healthy
@@ -170,7 +172,7 @@ services:
       - "${SUPABASE_FUNCTIONS_PORT:-54325}:9000"
 
   studio:
-    image: supabase/studio:20240829-155743
+    image: supabase/studio:latest
     restart: unless-stopped
     environment:
       STUDIO_PG_META_URL: http://meta:8080
@@ -201,15 +203,15 @@ services:
       PG_META_DB_USER: postgres
       PG_META_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
 
-  analytics:
-    image: supabase/logflare:1.9.0
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      LOGFLARE_LOGGER_BACKEND: console
-      DATABASE_URL: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
+  #analytics:
+  # image: supabase/logflare:1.9.0
+  # restart: unless-stopped
+  # depends_on:
+  #   db:
+  #     condition: service_healthy
+  # environment:
+  #   LOGFLARE_LOGGER_BACKEND: console
+  #   DATABASE_URL: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
 
   # Kong временно отключен - без volumes не может прочитать kong.yml
   # Обращаемся напрямую к сервисам через их порты:
