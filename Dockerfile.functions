@@ -1,10 +1,11 @@
 FROM supabase/edge-runtime:v1.43.2
 
 # Копируем Edge Functions в образ
-COPY supabase/functions /home/deno/functions
+# Edge Runtime ищет функции в /var/functions по умолчанию
+COPY supabase/functions /var/functions
 
 # Убеждаемся, что директория существует
-RUN mkdir -p /home/deno/functions
+RUN mkdir -p /var/functions
 
-WORKDIR /home/deno
+WORKDIR /var/functions
 
