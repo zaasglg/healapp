@@ -85,7 +85,7 @@ services:
       retries: 10
 
   realtime:
-    image: supabase/realtime:v2.22.12
+    image: supabase/realtime:v2.33.58
     restart: unless-stopped
     depends_on:
       db:
@@ -151,26 +151,25 @@ services:
   #     IMGPROXY_ENABLE_WEBP_DETECTION: "true"
   #     IMGPROXY_MAX_ANIMATION_FRAMES: 30
 
-  functions:
-    image: supabase/edge-runtime:v1.43.2
-    restart: unless-stopped
-    command: start
-    depends_on:
-      db:
-        condition: service_healthy
-      rest:
-        condition: service_started
-    environment:
-      EDGE_FUNCTIONS: "true"
-      # Без Kong обращаемся напрямую к REST API
-      SUPABASE_URL: ${SUPABASE_SITE_URL:-http://localhost:54321}
-      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
-      SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
-    # volumes убраны для совместимости с Timeweb Cloud
-    # Edge Functions нужно будет применить через SQL вручную
-    ports:
-      - "${SUPABASE_FUNCTIONS_PORT:-54325}:9000"
+  # functions временно отключен - требует volumes для Edge Functions
+  # Для работы функций нужно задеплоить их через Supabase CLI
+  # functions:
+  #   image: supabase/edge-runtime:v1.43.2
+  #   restart: unless-stopped
+  #   command: start
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #     rest:
+  #       condition: service_started
+  #   environment:
+  #     EDGE_FUNCTIONS: "true"
+  #     SUPABASE_URL: ${SUPABASE_SITE_URL:-http://localhost:54321}
+  #     SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+  #     SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+  #     SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
+  #   ports:
+  #     - "${SUPABASE_FUNCTIONS_PORT:-54325}:9000"
 
   studio:
     image: supabase/studio:latest
