@@ -23,9 +23,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    volumes:
-      - supabase-db:/var/lib/postgresql/data
-      - ./supabase/migrations:/docker-entrypoint-initdb.d/migrations:ro
+    # volumes убраны для совместимости с Timeweb Cloud
+    # Данные БД будут храниться внутри контейнера
     ports:
       - "${SUPABASE_DB_PORT:-54322}:5432"
 
@@ -121,8 +120,7 @@ services:
       FILE_STORAGE_BACKEND: file
       FILE_STORAGE_BACKEND_PATH: /var/lib/storage
       <<: *common-env
-    volumes:
-      - supabase-storage:/var/lib/storage
+    # volumes убраны для совместимости с Timeweb Cloud
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 5s
@@ -139,8 +137,7 @@ services:
       IMGPROXY_LOCAL_FILESYSTEM_ROOT: /var/lib/storage
       IMGPROXY_ENABLE_WEBP_DETECTION: "true"
       IMGPROXY_MAX_ANIMATION_FRAMES: 30
-    volumes:
-      - supabase-storage:/var/lib/storage:ro
+    # volumes убраны для совместимости с Timeweb Cloud
 
   functions:
     image: supabase/edge-runtime:v1.43.2
@@ -156,9 +153,8 @@ services:
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
       SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
-    volumes:
-      - ./supabase/functions:/home/deno/functions:ro
-      - ./supabase/config.toml:/home/deno/project/config.toml:ro
+    # volumes убраны для совместимости с Timeweb Cloud
+    # Edge Functions нужно будет применить через SQL вручную
     ports:
       - "${SUPABASE_FUNCTIONS_PORT:-54325}:9000"
 
@@ -217,10 +213,8 @@ services:
     ports:
       - "${SUPABASE_API_PORT:-54321}:8000"
       - "${SUPABASE_API_SSL_PORT:-54323}:8443"
-    volumes:
-      - ./kong.yml:/var/lib/kong/kong.yml:ro
+    # volumes убраны для совместимости с Timeweb Cloud
+    # Kong будет использовать дефолтную конфигурацию
 
-volumes:
-  supabase-db:
-  supabase-storage:
+# volumes секция удалена для совместимости с Timeweb Cloud
 
