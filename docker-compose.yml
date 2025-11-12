@@ -1,4 +1,4 @@
-version: "3.9"
+# version: "3.9"  # устарело, удалено
 
 x-common-env: &common-env
   JWT_SECRET: ${SUPABASE_JWT_SECRET}
@@ -99,6 +99,8 @@ services:
       PORT: 4000
       SECURE_CHANNELS: "true"
       API_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      SECRET_KEY_BASE: ${SUPABASE_JWT_SECRET}
+      APP_NAME: supabase_realtime
       FLY_POSTGRES_HOST: db
       REPLICATION_MODE: RLS
     ports:
@@ -110,7 +112,7 @@ services:
       retries: 10
 
   storage:
-    image: supabase/storage-api:v0.50.7
+    image: supabase/storage-api:latest
     restart: unless-stopped
     depends_on:
       rest:
@@ -119,9 +121,11 @@ services:
       STORAGE_POSTGREST_URL: http://rest:3000
       STORAGE_LAUNCH_DARKLY_KEY: ""
       STORAGE_DATABASE_URL: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
+      DATABASE_URL: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
       STORAGE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
       STORAGE_ANON_KEY: ${SUPABASE_ANON_KEY}
       STORAGE_SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      PGRST_JWT_SECRET: ${SUPABASE_JWT_SECRET}
       STORAGE_S3_BUCKET: storage
       FILE_STORAGE_BACKEND: file
       FILE_STORAGE_BACKEND_PATH: /var/lib/storage
@@ -150,6 +154,7 @@ services:
   functions:
     image: supabase/edge-runtime:v1.43.2
     restart: unless-stopped
+    command: start
     depends_on:
       db:
         condition: service_healthy
@@ -168,7 +173,7 @@ services:
       - "${SUPABASE_FUNCTIONS_PORT:-54325}:9000"
 
   studio:
-    image: supabase/studio:20240829-155743
+    image: supabase/studio:latest
     restart: unless-stopped
     environment:
       STUDIO_PG_META_URL: http://meta:8080
@@ -199,15 +204,16 @@ services:
       PG_META_DB_USER: postgres
       PG_META_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
 
-  analytics:
-    image: supabase/logflare:1.9.0
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      LOGFLARE_LOGGER_BACKEND: console
-      DATABASE_URL: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
+  # analytics временно отключен - требует gcloud.json
+  # analytics:
+  #   image: supabase/logflare:1.9.0
+  #   restart: unless-stopped
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   environment:
+  #     LOGFLARE_LOGGER_BACKEND: console
+  #     DATABASE_URL: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
 
   # Kong временно отключен - без volumes не может прочитать kong.yml
   # Обращаемся напрямую к сервисам через их порты:
