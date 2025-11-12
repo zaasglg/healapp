@@ -28,5 +28,6 @@ dist-ssr
 .env.local
 .env.production.local
 .env.*.local
+.env.docker
 # Но НЕ игнорируем .env.production (может быть нужен для деплоя)
 !.env.production.example
