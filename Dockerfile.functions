@@ -1,16 +1,16 @@
 FROM supabase/edge-runtime:v1.43.2
 
-# Edge Runtime ищет функции в /home/deno/functions по умолчанию
-# Устанавливаем WORKDIR перед копированием
-WORKDIR /home/deno
-
-# Создаем директорию functions
+# Официальный Supabase использует /home/deno/functions для Edge Functions
+# Создаем директорию и копируем функции
 RUN mkdir -p /home/deno/functions
 
-# Копируем функции с сохранением структуры (используем / в конце для копирования содержимого)
+# Копируем функции с сохранением структуры
 COPY supabase/functions/ /home/deno/functions/
 
 # Проверяем что скопировалось
 RUN ls -la /home/deno/functions/ && \
     ls -la /home/deno/functions/accept-invite/ && \
-    test -f /home/deno/functions/accept-invite/index.ts && echo "Functions copied successfully" || (echo "Functions not found" && find /home/deno -type f)
+    test -f /home/deno/functions/accept-invite/index.ts && echo "✅ Functions copied successfully" || (echo "❌ Functions not found" && find /home/deno -type f)
+
+# Устанавливаем WORKDIR (Edge Runtime ожидает /home/deno)
+WORKDIR /home/deno

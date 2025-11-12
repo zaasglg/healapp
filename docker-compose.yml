@@ -158,6 +158,8 @@ services:
       dockerfile: Dockerfile.functions
     restart: unless-stopped
     command: start
+    # Важно: не монтируем volumes, используем только функции из образа
+    init: true
     depends_on:
       db:
         condition: service_healthy
@@ -170,6 +172,8 @@ services:
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
       SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
       JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      RUST_BACKTRACE: "1"
+      VERBOSE: "true"
     ports:
       - "${SUPABASE_FUNCTIONS_PORT:-54325}:9000"
 
