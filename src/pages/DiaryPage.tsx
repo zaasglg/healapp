@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import type { TouchEvent } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
+import { supabase } from '@/lib/supabase'
 import { Button, Input } from '@/components/ui'
 import { PinnedMetricPanel } from '@/components/PinnedMetricPanel'
 import type { MetricFillData } from '@/components/MetricFillModal'
@@ -19,6 +20,7 @@ interface PatientCard {
   gender: 'male' | 'female'
   diagnoses: string[]
   mobility: 'walks' | 'sits' | 'lies'
+  address?: string | null
 }
 
 type OrganizationType = 'pension' | 'patronage_agency' | 'caregiver' | null
@@ -111,10 +113,10 @@ const normalizeSettings = (raw: any): MetricSettings => {
     times = Array.from(
       new Set(
         raw.times
-          .map((time: string) => String(time ?? '').slice(0, 5))
-          .filter(time => time && time.includes(':'))
+          .map((time: unknown) => String(time ?? '').slice(0, 5))
+          .filter((time: string): time is string => Boolean(time) && time.includes(':'))
       )
-    ).sort()
+    ).sort() as string[]
   } else if (typeof raw?.frequency === 'number' && raw.frequency > 0) {
     times = generateTimes(Math.floor(raw.frequency), baseStart, baseEnd)
   }
@@ -180,15 +182,42 @@ const mergeDiaryEntries = (entries: any[]): DiaryMetricValue[] => {
   )
 }
 
-const loadDiaryHistoryEntries = (diaryId: string): DiaryMetricValue[] => {
+const loadDiaryHistoryEntries = async (diaryId: string, date?: string): Promise<DiaryMetricValue[]> => {
   try {
+    // Используем RPC для получения истории из Supabase
+    const targetDate = date ? new Date(date).toISOString().split('T')[0] : undefined
+    const { data, error } = await supabase.rpc('get_diary_history', {
+      p_diary_id: diaryId,
+      p_date: targetDate || null,
+    })
+
+    if (error) {
+      console.error('Ошибка загрузки истории:', error)
+      // Fallback на localStorage если RPC не работает
+      const storage = JSON.parse(localStorage.getItem('diary_history') || '{}')
+      if (!storage || typeof storage !== 'object') return []
+      const rawEntries = storage[diaryId] || []
+      return mergeDiaryEntries(rawEntries)
+    }
+
+    // Преобразуем данные из Supabase в формат DiaryMetricValue
+    return (data || []).map((item: any) => {
+      const payload = item.payload || {}
+      return {
+        id: payload.metric_id || `value_${Date.now()}_${Math.random()}`,
+        diary_id: diaryId,
+        metric_type: payload.metric_key || '',
+        value: payload.value || null,
+        created_at: item.occurred_at || new Date().toISOString(),
+      }
+    })
+  } catch (error) {
+    console.error('Ошибка загрузки истории:', error)
+    // Fallback на localStorage
     const storage = JSON.parse(localStorage.getItem('diary_history') || '{}')
     if (!storage || typeof storage !== 'object') return []
     const rawEntries = storage[diaryId] || []
     return mergeDiaryEntries(rawEntries)
-  } catch (error) {
-    console.warn('Не удалось загрузить историю дневника', error)
-    return []
   }
 }
 
@@ -1090,187 +1119,184 @@ export const DiaryPage = () => {
     organizationType,
   ])
 
+  // Функция для загрузки назначенных сотрудников из Supabase
+  const loadAssignedEmployees = async () => {
+    if (!diary || !id) return
+
+    try {
+      const { data, error } = await supabase
+        .from('diary_employee_access')
+        .select(`
+          user_id,
+          organization_employees!inner (
+            first_name,
+            last_name,
+            employee_role,
+            organizations!inner (
+              organization_type
+            )
+          )
+        `)
+        .eq('diary_id', id)
+        .is('revoked_at', null)
+
+      if (error) {
+        console.error('Ошибка загрузки назначенных сотрудников:', error)
+        // Fallback на localStorage
+        const storedAssignments = JSON.parse(localStorage.getItem('diary_employee_access') || '{}')
+        const currentAssignments = Array.isArray(storedAssignments?.[diary.id])
+          ? storedAssignments[diary.id]
+          : []
+        return currentAssignments.map((item: any) => ({
+          user_id: item.user_id,
+          first_name: item.first_name || '',
+          last_name: item.last_name || '',
+          role: item.role || '',
+          organization_type: item.organization_type || null,
+        }))
+      }
+
+      // Преобразуем данные из Supabase
+      return (data || []).map((item: any) => ({
+        user_id: item.user_id,
+        first_name: item.organization_employees?.first_name || '',
+        last_name: item.organization_employees?.last_name || '',
+        role: item.organization_employees?.employee_role || '',
+        organization_type: item.organization_employees?.organizations?.organization_type || null,
+      }))
+    } catch (error) {
+      console.error('Ошибка загрузки назначенных сотрудников:', error)
+      return []
+    }
+  }
+
   useEffect(() => {
     if (!diary) return
 
     setAssignmentsLoaded(false)
 
-    let normalizedAssignments: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string; organization_type?: OrganizationType | null }> = []
+    const loadData = async () => {
+      let normalizedAssignments: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string; organization_type?: OrganizationType | null }> = []
 
-    try {
-      const storedAssignments = JSON.parse(localStorage.getItem('diary_employee_access') || '{}')
-      const currentAssignments = Array.isArray(storedAssignments?.[diary.id])
-        ? storedAssignments[diary.id]
-        : []
-      console.log('[DiaryPage] storedAssignments for diary', diary.id, currentAssignments)
+      // Загружаем из Supabase
+      normalizedAssignments = await loadAssignedEmployees()
 
-      normalizedAssignments = currentAssignments.map((item: any) => ({
-        user_id: item.user_id,
-        first_name: item.first_name || '',
-        last_name: item.last_name || '',
-        role: item.role || '',
-        organization_type: item.organization_type || null,
-      }))
-    } catch (error) {
-      console.warn('Не удалось загрузить доступ специалистов к дневнику', error)
-      normalizedAssignments = []
-    }
+      let employeesForOrganization: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> = []
 
-    let employeesForOrganization: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> = []
+      if (isOrganizationAccount) {
+        try {
+          // Загружаем сотрудников из Supabase
+          const orgId = normalizeId(effectiveOrganizationId) || normalizeId(diary.organization_id)
+          if (orgId) {
+            const { data: employeesData, error: employeesError } = await supabase
+              .from('organization_employees')
+              .select(`
+                user_id,
+                first_name,
+                last_name,
+                role,
+                organizations!inner (
+                  organization_type
+                )
+              `)
+              .eq('organization_id', orgId)
 
-    if (isOrganizationAccount) {
-      try {
-        const employeesRaw = JSON.parse(localStorage.getItem('local_employees') || '[]')
-        const employees = Array.isArray(employeesRaw) ? [...employeesRaw] : []
+            if (!employeesError && employeesData) {
+              employeesForOrganization = employeesData.map((emp: any) => ({
+                user_id: emp.user_id,
+                first_name: emp.first_name || '',
+                last_name: emp.last_name || '',
+                role: emp.role || '',
+                organization_type: emp.organizations?.organization_type || null,
+              }))
+            }
+          }
 
-        const candidateOrgIds = [
-          normalizeId(effectiveOrganizationId),
-          normalizeId(userOrganizationId),
-          normalizeId(currentUser.organization_id),
-          normalizeId(diary.organization_id),
-        ]
-          .filter((id): id is string => Boolean(id))
-          .filter((id, index, arr) => arr.indexOf(id) === index)
+          // Fallback на localStorage если Supabase не работает
+          if (employeesForOrganization.length === 0) {
+            const employeesRaw = JSON.parse(localStorage.getItem('local_employees') || '[]')
+            const employees = Array.isArray(employeesRaw) ? [...employeesRaw] : []
 
-        const canonicalOrgId =
-          normalizeId(effectiveOrganizationId) ||
-          normalizeId(diary.organization_id) ||
-          (candidateOrgIds.length > 0 ? candidateOrgIds[0] : null)
+            const candidateOrgIds = [
+              normalizeId(effectiveOrganizationId),
+              normalizeId(userOrganizationId),
+              normalizeId(currentUser.organization_id),
+              normalizeId(diary.organization_id),
+            ]
+              .filter((id): id is string => Boolean(id))
+              .filter((id, index, arr) => arr.indexOf(id) === index)
 
-        console.log('[DiaryPage] load available employees', {
-          employees,
-          effectiveOrganizationId,
-          userOrganizationId,
-          diaryOrganizationId: diary.organization_id,
-          candidateOrgIds,
-          canonicalOrgId,
-          isPatronage: assignmentOrganizationType === 'patronage_agency',
-        })
-
-        let needsRewrite = false
-
-        const filteredEmployees = employees.filter((employee: any, index: number) => {
-          if (!employee) return false
-          const employeeOrgId = normalizeId(employee.organization_id)
-          const matches =
-            candidateOrgIds.length === 0
-              ? false
-              : Boolean(employeeOrgId && candidateOrgIds.includes(employeeOrgId))
-
-          if (!matches) {
-            console.log('[DiaryPage] employee filtered out', {
-              employeeId: employee.user_id || employee.id,
-              employeeOrg: employee.organization_id,
-              expectedOrg: candidateOrgIds,
+            const filteredEmployees = employees.filter((employee: any) => {
+              if (!employee) return false
+              const employeeOrgId = normalizeId(employee.organization_id)
+              return Boolean(employeeOrgId && candidateOrgIds.includes(employeeOrgId))
             })
-            return false
+
+            employeesForOrganization = filteredEmployees.map((employee: any) => ({
+              user_id: employee.user_id || employee.id,
+              first_name: employee.first_name || '',
+              last_name: employee.last_name || '',
+              role: employee.role || '',
+              organization_type: employee.organization_type || null,
+            }))
           }
+        } catch (error) {
+          console.warn('Не удалось загрузить сотрудников организации', error)
+          employeesForOrganization = []
+        }
+      }
 
-          if (canonicalOrgId && employeeOrgId !== canonicalOrgId) {
-            employees[index] = {
-              ...employee,
-              organization_id: canonicalOrgId,
-            }
-            needsRewrite = true
-          }
+      setAvailableOrgEmployees(employeesForOrganization)
 
-          return true
-        })
+      // Для пансионатов по умолчанию все сотрудники имеют доступ, если доступы не настроены явно.
+      let assignmentsToPersist: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> | null =
+        null
+      if (
+        isOrganizationAccount &&
+        assignmentOrganizationType === 'pension' &&
+        normalizedAssignments.length === 0 &&
+        employeesForOrganization.length > 0
+      ) {
+        normalizedAssignments = employeesForOrganization
+        assignmentsToPersist = employeesForOrganization
+        console.log('[DiaryPage] auto-assign all employees for pension', assignmentsToPersist)
+      } else if (isOrganizationAccount && employeesForOrganization.length > 0) {
+        // Удаляем из доступа сотрудников, которых больше нет в организации.
+        const filteredAssignments = normalizedAssignments.filter(assignment =>
+          employeesForOrganization.some(employee => employee.user_id === assignment.user_id)
+        )
+        if (filteredAssignments.length !== normalizedAssignments.length) {
+          normalizedAssignments = filteredAssignments
+          assignmentsToPersist = filteredAssignments
+          console.log('[DiaryPage] cleaned assignment list', { normalizedAssignments })
+        }
+      }
 
-        if (filteredEmployees.length === 0 && employees.length > 0) {
-          console.warn('[DiaryPage] no employees matched organization candidates, using all employees', {
-            employees,
-            candidateOrgIds,
-          })
-          const fallbackOrgId =
-            canonicalOrgId ||
-            (candidateOrgIds.length > 0 ? candidateOrgIds[0] : null)
-          employeesForOrganization = employees.map((employee: any, index: number) => {
-            const unifiedId = employee.user_id || employee.id
-            if (fallbackOrgId && normalizeId(employee.organization_id) !== fallbackOrgId) {
-              employees[index] = {
-                ...employee,
-                organization_id: fallbackOrgId,
+      if (assignmentsToPersist) {
+        try {
+          // Для пансионатов автоматически назначаем всех сотрудников через RPC
+          if (assignmentOrganizationType === 'pension') {
+            for (const employee of assignmentsToPersist) {
+              try {
+                await supabase.rpc('assign_employee_to_diary', {
+                  p_diary_id: diary.id,
+                  p_user_id: employee.user_id,
+                })
+              } catch (error) {
+                console.warn('Не удалось назначить доступ сотруднику:', error)
               }
-              needsRewrite = true
             }
-            return {
-              id: unifiedId,
-              user_id: unifiedId,
-              first_name: employee.first_name || '',
-              last_name: employee.last_name || '',
-              role: employee.role || '',
-              organization_type: employee.organization_type || null,
-            }
-          })
-        } else {
-          employeesForOrganization = filteredEmployees.map((employee: any) => {
-            const unifiedId = employee.user_id || employee.id
-            return {
-              id: unifiedId,
-              user_id: unifiedId,
-              first_name: employee.first_name || '',
-              last_name: employee.last_name || '',
-              role: employee.role || '',
-              organization_type: employee.organization_type || null,
-            }
-          })
+          }
+        } catch (error) {
+          console.warn('Не удалось сохранить доступ сотрудников организации', error)
         }
-
-        if (needsRewrite) {
-          localStorage.setItem('local_employees', JSON.stringify(employees))
-        }
-
-        console.log('[DiaryPage] mapped available employees', employeesForOrganization)
-      } catch (error) {
-        console.warn('Не удалось загрузить сотрудников организации', error)
-        employeesForOrganization = []
       }
+
+      setAssignedEmployees(normalizedAssignments)
+      setAssignmentsLoaded(true)
     }
 
-    setAvailableOrgEmployees(employeesForOrganization)
-
-    // Для пансионатов по умолчанию все сотрудники имеют доступ, если доступы не настроены явно.
-    let assignmentsToPersist: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> | null =
-      null
-    if (
-      isOrganizationAccount &&
-      assignmentOrganizationType === 'pension' &&
-      normalizedAssignments.length === 0 &&
-      employeesForOrganization.length > 0
-    ) {
-      normalizedAssignments = employeesForOrganization
-      assignmentsToPersist = employeesForOrganization
-      console.log('[DiaryPage] auto-assign all employees for pension', assignmentsToPersist)
-    } else if (isOrganizationAccount && employeesForOrganization.length > 0) {
-      // Удаляем из доступа сотрудников, которых больше нет в организации.
-      const filteredAssignments = normalizedAssignments.filter(assignment =>
-        employeesForOrganization.some(employee => employee.user_id === assignment.user_id)
-      )
-      if (filteredAssignments.length !== normalizedAssignments.length) {
-        normalizedAssignments = filteredAssignments
-        assignmentsToPersist = filteredAssignments
-        console.log('[DiaryPage] cleaned assignment list', { normalizedAssignments })
-      }
-    }
-
-    if (assignmentsToPersist) {
-      try {
-        const stored = JSON.parse(localStorage.getItem('diary_employee_access') || '{}')
-        stored[diary.id] = assignmentsToPersist.map(item => ({
-          user_id: item.user_id,
-          first_name: item.first_name || '',
-          last_name: item.last_name || '',
-          role: item.role || '',
-        }))
-        localStorage.setItem('diary_employee_access', JSON.stringify(stored))
-      } catch (error) {
-        console.warn('Не удалось сохранить доступ сотрудников организации', error)
-      }
-    }
-
-    setAssignedEmployees(normalizedAssignments)
-    setAssignmentsLoaded(true)
+    loadData()
   }, [diary, isOrganizationAccount, organizationType, effectiveOrganizationId])
 
   useEffect(() => {
@@ -1306,7 +1332,6 @@ export const DiaryPage = () => {
     organizationAccountAccess,
     organizationEmployeeAccess,
     caregiverAccess,
-    canManageDiarySettings,
     canEditCardSettings,
     canManageMetricsSettings,
     canManageAccessSettings,
@@ -1505,9 +1530,9 @@ export const DiaryPage = () => {
     return null
   }
 
-  // Функция для отзыва доступа
-  const handleAddEmployeeAccess = (employeeId?: string) => {
-    if (!diary) return
+  // Функция для назначения доступа сотруднику
+  const handleAddEmployeeAccess = async (employeeId?: string) => {
+    if (!diary || !id) return
     const targetId = employeeId || selectedEmployeeId
     if (!targetId) {
       console.warn('[DiaryPage] handleAddEmployeeAccess: targetId is empty')
@@ -1524,30 +1549,63 @@ export const DiaryPage = () => {
       console.log('[DiaryPage] handleAddEmployeeAccess: already has access', { targetId })
       return
     }
-    const accessEntry = resolveEmployeeById(targetId)
-    if (!accessEntry) {
-      console.warn('[DiaryPage] handleAddEmployeeAccess: employee not found', {
-        targetId,
-        availableOrgEmployees,
-        assignedEmployees,
+
+    try {
+      // Используем RPC для назначения доступа
+      const { error } = await supabase.rpc('assign_employee_to_diary', {
+        p_diary_id: id,
+        p_user_id: targetId,
       })
-      setSettingsError('Не удалось подготовить доступ для специалиста. Попробуйте позже.')
-      return
+
+      if (error) {
+        console.error('Ошибка назначения доступа:', error)
+        setSettingsError(error.message || 'Не удалось назначить доступ. Попробуйте позже.')
+        return
+      }
+
+      // Обновляем локальное состояние
+      const accessEntry = resolveEmployeeById(targetId)
+      if (accessEntry) {
+        const next = [...assignedEmployees, accessEntry]
+        setAssignedEmployees(next)
+        if (!employeeId) {
+          setSelectedEmployeeId('')
+        }
+        setSettingsError(null)
+      } else {
+        // Если не нашли в локальных данных, перезагружаем список
+        await loadAssignedEmployees()
+      }
+    } catch (error) {
+      console.error('Ошибка назначения доступа:', error)
+      setSettingsError('Не удалось назначить доступ. Попробуйте позже.')
     }
-    console.log('[DiaryPage] handleAddEmployeeAccess: adding employee', { targetId, accessEntry })
-    const next = [...assignedEmployees, accessEntry]
-    console.log('[DiaryPage] handleAddEmployeeAccess: next assigned employees', next)
-    if (!employeeId) {
-      setSelectedEmployeeId('')
-    }
-    setSettingsError(null)
-    persistAssignedEmployees(next)
   }
 
-  const handleRemoveEmployeeAccess = (userId: string) => {
-    if (!diary) return
-    const next = assignedEmployees.filter(employee => employee.user_id !== userId)
-    persistAssignedEmployees(next)
+  const handleRemoveEmployeeAccess = async (userId: string) => {
+    if (!diary || !id) return
+
+    try {
+      // Используем RPC для отзыва доступа
+      const { error } = await supabase.rpc('remove_employee_from_diary', {
+        p_diary_id: id,
+        p_user_id: userId,
+      })
+
+      if (error) {
+        console.error('Ошибка отзыва доступа:', error)
+        setSettingsError(error.message || 'Не удалось отозвать доступ. Попробуйте позже.')
+        return
+      }
+
+      // Обновляем локальное состояние
+      const next = assignedEmployees.filter(employee => employee.user_id !== userId)
+      setAssignedEmployees(next)
+      setSettingsError(null)
+    } catch (error) {
+      console.error('Ошибка отзыва доступа:', error)
+      setSettingsError('Не удалось отозвать доступ. Попробуйте позже.')
+    }
   }
 
   const handleRemoveAccess = (accessType: 'caregiver' | 'organization') => {
@@ -1638,27 +1696,80 @@ export const DiaryPage = () => {
       setPatientCard(foundCard)
     }
 
-    // Загружаем показатели дневника
-    const allMetrics = JSON.parse(localStorage.getItem('diary_metrics') || '[]')
-    const diaryMetrics = allMetrics.filter((m: DiaryMetric) => m.diary_id === id)
-    setMetrics(diaryMetrics)
+    // Загружаем показатели дневника из Supabase
+    const loadMetrics = async () => {
+      if (!id) return
 
-    // Загружаем значения показателей
-    const allValues = JSON.parse(localStorage.getItem('diary_metric_values') || '[]')
-    const diaryValues = allValues.filter((v: DiaryMetricValue) => v.diary_id === id)
+      try {
+        const { data: metricsData, error: metricsError } = await supabase
+          .from('diary_metrics')
+          .select('*')
+          .eq('diary_id', id)
 
-    const historyEntries = loadDiaryHistoryEntries(id)
-    const mergedDiaryValues = mergeDiaryEntries([
-      ...diaryValues,
-      ...historyEntries,
-    ])
+        if (metricsError) {
+          console.error('Ошибка загрузки метрик:', metricsError)
+          // Fallback на localStorage
+          const allMetrics = JSON.parse(localStorage.getItem('diary_metrics') || '[]')
+          const diaryMetrics = allMetrics.filter((m: DiaryMetric) => m.diary_id === id)
+          setMetrics(diaryMetrics)
+        } else {
+          setMetrics((metricsData || []).map((m: any) => ({
+            id: m.id,
+            diary_id: m.diary_id,
+            metric_type: m.metric_key,
+            is_pinned: m.is_pinned,
+            settings: m.metadata?.settings || undefined,
+          })))
+        }
+      } catch (error) {
+        console.error('Ошибка загрузки метрик:', error)
+      }
+    }
 
-    const otherDiaryValues = (allValues as DiaryMetricValue[]).filter(entry => entry.diary_id !== id)
-    const nextAllValues = mergeDiaryEntries([...otherDiaryValues, ...mergedDiaryValues])
-    localStorage.setItem('diary_metric_values', JSON.stringify(nextAllValues))
-    persistDiaryHistoryEntries(id, mergedDiaryValues)
+    // Загружаем значения показателей из Supabase
+    const loadMetricValues = async () => {
+      if (!id) return
 
-    setMetricValues(mergedDiaryValues)
+      try {
+        // Загружаем историю за сегодня
+        const today = new Date().toISOString().split('T')[0]
+        const historyEntries = await loadDiaryHistoryEntries(id, today)
+
+        // Также загружаем последние значения метрик
+        const { data: valuesData, error: valuesError } = await supabase
+          .from('diary_metric_values')
+          .select('*')
+          .eq('diary_id', id)
+          .order('recorded_at', { ascending: false })
+          .limit(100)
+
+        if (valuesError) {
+          console.error('Ошибка загрузки значений метрик:', valuesError)
+          // Fallback на localStorage
+          const allValues = JSON.parse(localStorage.getItem('diary_metric_values') || '[]')
+          const diaryValues = allValues.filter((v: DiaryMetricValue) => v.diary_id === id)
+          setMetricValues(diaryValues)
+        } else {
+          // Преобразуем данные из Supabase в формат DiaryMetricValue
+          const supabaseValues = (valuesData || []).map((v: any) => ({
+            id: v.id,
+            diary_id: v.diary_id,
+            metric_type: v.metric_key,
+            value: v.value,
+            created_at: v.recorded_at || v.created_at,
+          }))
+
+          // Объединяем с историей
+          const mergedValues = mergeDiaryEntries([...supabaseValues, ...historyEntries])
+          setMetricValues(mergedValues)
+        }
+      } catch (error) {
+        console.error('Ошибка загрузки значений метрик:', error)
+      }
+    }
+
+    loadMetrics()
+    loadMetricValues()
 
     // Загружаем настройки времени заполнения
     const rawSettings = JSON.parse(localStorage.getItem('diary_metric_settings') || '{}')
@@ -1670,7 +1781,7 @@ export const DiaryPage = () => {
       loadedSettings[metricType] = normalizeSettings(value)
     })
 
-    diaryMetrics.forEach(metric => {
+    metrics.forEach((metric: DiaryMetric) => {
       if (!loadedSettings[metric.metric_type] && metric.settings) {
         loadedSettings[metric.metric_type] = normalizeSettings(metric.settings)
       }
@@ -1890,10 +2001,36 @@ export const DiaryPage = () => {
 
   const PANEL_TRANSITION_MS = 520
 
+  // Загружаем историю из Supabase при изменении даты
+  const [historyForDate, setHistoryForDate] = useState<DiaryMetricValue[]>([])
+  
+  useEffect(() => {
+    const loadHistoryForDate = async () => {
+      if (!id || !selectedDate) {
+        setHistoryForDate([])
+        return
+      }
+
+      try {
+        const history = await loadDiaryHistoryEntries(id, selectedDate)
+        setHistoryForDate(history)
+      } catch (error) {
+        console.error('Ошибка загрузки истории для даты:', error)
+        setHistoryForDate([])
+      }
+    }
+
+    loadHistoryForDate()
+  }, [id, selectedDate])
+
   const historyEntries = useMemo(() => {
     if (!selectedDate) return []
     const targetDate = fromInputDate(selectedDate)
-    return metricValues
+    
+    // Объединяем данные из Supabase и локальные значения
+    const allEntries = [...metricValues, ...historyForDate]
+    
+    return allEntries
       .filter(entry => {
         const entryDate = new Date(entry.created_at)
         return (
@@ -2176,27 +2313,51 @@ export const DiaryPage = () => {
     setIsMetricModalOpen(true)
   }
 
-  const handleSaveRegularMetric = (metricType: string, value: string | number | boolean) => {
+  const handleSaveRegularMetric = async (metricType: string, value: string | number | boolean) => {
     if (!id) return
 
-    const entry: DiaryMetricValue = {
-      id: `value_${Date.now()}`,
-      diary_id: id,
-      metric_type: metricType,
-      value,
-      created_at: new Date().toISOString(),
+    try {
+      // Сохраняем через RPC
+      const { data, error } = await supabase.rpc('save_metric_value', {
+        p_diary_id: id,
+        p_metric_key: metricType,
+        p_value: typeof value === 'object' ? value : { value },
+        p_recorded_at: new Date().toISOString(),
+        p_metadata: {},
+      })
+
+      if (error) {
+        console.error('Ошибка сохранения метрики:', error)
+        // Fallback на localStorage
+        const entry: DiaryMetricValue = {
+          id: `value_${Date.now()}`,
+          diary_id: id,
+          metric_type: metricType,
+          value,
+          created_at: new Date().toISOString(),
+        }
+        const storedValues = JSON.parse(localStorage.getItem('diary_metric_values') || '[]')
+        const mergedStoredValues = mergeDiaryEntries([...storedValues, entry])
+        localStorage.setItem('diary_metric_values', JSON.stringify(mergedStoredValues))
+        const mergedHistoryValues = mergeDiaryEntries([...metricValues, entry])
+        setMetricValues(mergedHistoryValues)
+        return
+      }
+
+      // Обновляем локальное состояние
+      const entry: DiaryMetricValue = {
+        id: data?.id || `value_${Date.now()}`,
+        diary_id: id,
+        metric_type: metricType,
+        value: typeof value === 'object' ? (value as any).value : value,
+        created_at: data?.recorded_at || new Date().toISOString(),
+      }
+
+      const mergedHistoryValues = mergeDiaryEntries([...metricValues, entry])
+      setMetricValues(mergedHistoryValues)
+    } catch (error) {
+      console.error('Ошибка сохранения метрики:', error)
     }
-
-    const storedValues = JSON.parse(localStorage.getItem('diary_metric_values') || '[]')
-    const mergedStoredValues = mergeDiaryEntries([...storedValues, entry])
-    localStorage.setItem('diary_metric_values', JSON.stringify(mergedStoredValues))
-
-    const mergedHistoryValues = mergeDiaryEntries([...metricValues, entry])
-    setMetricValues(mergedHistoryValues)
-    persistDiaryHistoryEntries(
-      id,
-      mergedHistoryValues.filter(entry => entry.diary_id === id)
-    )
   }
 
   const persistOrganizationLink = (data: DiaryClientLink) => {
@@ -2641,8 +2802,6 @@ export const DiaryPage = () => {
                       const lastValue = getLastMetricValue(metric.metric_type)
                       const displayValue = lastValue || '--'
                       const isAnimatingCard = animatingPinnedMetric?.type === metric.metric_type
-                      const shouldHoldLeft =
-                        panelVisible && panelMetric === metric.metric_type && panelOriginIndex === index && index !== 0
 
                       const translateValue = isAnimatingCard
                         ? animatingPinnedMetric!.direction === 'toPanel'
@@ -3023,7 +3182,7 @@ export const DiaryPage = () => {
                                       ))}
                                   </select>
                                   <button
-                                    onClick={handleAddEmployeeAccess}
+                                    onClick={() => handleAddEmployeeAccess()}
                                     disabled={!selectedEmployeeId}
                                     className="px-4 py-2 rounded-2xl bg-gradient-to-r from-[#7DD3DC] to-[#5CBCC7] text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
                                   >
@@ -3385,15 +3544,15 @@ export const DiaryPage = () => {
         {activeTab === 'client' && isOrganization && (
           <div className="space-y-5">
             {!organizationClientLink?.accepted_by && (
-              <div className="bg-white rounded-3xl shadow-sm p-6 space-y-3">
-                <h3 className="text-lg font-semibold text-gray-dark text-center">
-                  Поделитесь дневником с клиентом
-                </h3>
-                <p className="text-sm text-gray-600 text-center">
-                  Отправьте ссылку клиенту, чтобы он получил доступ к карточке подопечного и
-                  дневнику. Ссылка сохранится в его личном кабинете.
-                </p>
-              </div>
+            <div className="bg-white rounded-3xl shadow-sm p-6 space-y-3">
+              <h3 className="text-lg font-semibold text-gray-dark text-center">
+                Поделитесь дневником с клиентом
+              </h3>
+              <p className="text-sm text-gray-600 text-center">
+                Отправьте ссылку клиенту, чтобы он получил доступ к карточке подопечного и
+                дневнику. Ссылка сохранится в его личном кабинете.
+              </p>
+            </div>
             )}
 
             {organizationClientLink ? (
@@ -3426,9 +3585,9 @@ export const DiaryPage = () => {
                   </div>
                 )}
                 {!organizationClientLink.accepted_by && (
-                  <div className="bg-gray-100 rounded-2xl px-3 py-2 text-sm text-gray-700 break-all">
-                    {organizationClientLink.link}
-                  </div>
+                <div className="bg-gray-100 rounded-2xl px-3 py-2 text-sm text-gray-700 break-all">
+                  {organizationClientLink.link}
+                </div>
                 )}
                 {organizationClientLink.accepted_by && attachedClient ? (
                   <div className="border border-gray-100 rounded-2xl px-4 py-3 space-y-3 bg-[#F8FEFF]">
@@ -3479,23 +3638,23 @@ export const DiaryPage = () => {
                   </div>
                 ) : null}
                 {!organizationClientLink.accepted_by && (
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <Button onClick={() => handleCopyLink(organizationClientLink.link)} fullWidth>
-                      Скопировать ссылку
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() =>
-                        openWhatsApp(
-                          organizationClientLink.link,
-                          'Здравствуйте! Мы подготовили доступ к дневнику вашего близкого. Перейдите по ссылке:'
-                        )
-                      }
-                      fullWidth
-                    >
-                      Отправить в WhatsApp
-                    </Button>
-                  </div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Button onClick={() => handleCopyLink(organizationClientLink.link)} fullWidth>
+                    Скопировать ссылку
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      openWhatsApp(
+                        organizationClientLink.link,
+                        'Здравствуйте! Мы подготовили доступ к дневнику вашего близкого. Перейдите по ссылке:'
+                      )
+                    }
+                    fullWidth
+                  >
+                    Отправить в WhatsApp
+                  </Button>
+                </div>
                 )}
                 <p className="text-xs text-gray-400">
                   При необходимости вы можете сгенерировать новую ссылку — старая станет

@@ -45,8 +45,12 @@ security definer
 set search_path = public
 as $$
   select coalesce(
-    (select organization_id from user_profiles where user_id = auth.uid()),
-    (select organization_id from organization_employees where user_id = auth.uid() limit 1)
+    -- Если пользователь - это организация (user_id в таблице organizations)
+    (select id from organizations where user_id = auth.uid() limit 1),
+    -- Если пользователь - сотрудник организации
+    (select organization_id from organization_employees where user_id = auth.uid() limit 1),
+    -- Если пользователь - клиент с organization_id в user_profiles
+    (select organization_id from user_profiles where user_id = auth.uid())
   );
 $$;
 

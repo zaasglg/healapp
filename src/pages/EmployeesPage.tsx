@@ -2,12 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button, Select } from '@/components/ui'
 import { useAuthStore } from '@/store/authStore'
-import {
-  ensureEmployeeInviteTokens,
-  upsertEmployeeInviteToken,
-  deleteEmployeeInviteToken,
-  EmployeeInviteToken,
-} from '@/utils/inviteStorage'
+import { supabase } from '@/lib/supabase'
 
 type OrganizationType = 'pension' | 'patronage_agency' | 'caregiver' | null
 
@@ -20,6 +15,21 @@ type EmployeeRecord = {
   phone?: string | null
   role?: string | null
   created_at?: string
+}
+
+type InviteToken = {
+  id: string
+  token: string
+  invite_type: string
+  created_at: string
+  expires_at: string | null
+  used_at: string | null
+  revoked_at: string | null
+  organization_invite_tokens?: {
+    organization_id: string
+    organization_type: string
+    employee_role: string
+  } | null
 }
 
 const ROLE_OPTIONS = [
@@ -80,7 +90,7 @@ export const EmployeesPage = () => {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [employees, setEmployees] = useState<EmployeeRecord[]>([])
-  const [invites, setInvites] = useState<EmployeeInviteToken[]>([])
+  const [invites, setInvites] = useState<InviteToken[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
   const [selectedRole, setSelectedRole] = useState<string>(ROLE_OPTIONS[0]?.value ?? 'caregiver')
   const [copiedToken, setCopiedToken] = useState<string | null>(null)
@@ -89,69 +99,49 @@ export const EmployeesPage = () => {
   )
 
   const loadEmployees = useCallback(
-    (orgId: string | null, altOrgIds: string[] = []) => {
-      const canonicalOrgId = normalizeId(orgId)
-      const alternativeOrgIds = altOrgIds
-        .map(normalizeId)
-        .filter((id): id is string => Boolean(id) && id !== canonicalOrgId)
-
-      if (!canonicalOrgId && alternativeOrgIds.length === 0) {
+    async (orgId: string | null) => {
+      if (!orgId) {
         setEmployees([])
         return
       }
 
       try {
-        const raw = localStorage.getItem('local_employees')
-        const list: any[] = raw ? JSON.parse(raw) : []
+        const { data, error } = await supabase
+          .from('organization_employees')
+          .select(`
+            user_id,
+            organization_id,
+            first_name,
+            last_name,
+            phone,
+            role,
+            created_at,
+            organizations!inner (
+              organization_type
+            )
+          `)
+          .eq('organization_id', orgId)
 
-        if (!Array.isArray(list)) {
+        if (error) {
+          console.error('Ошибка загрузки сотрудников:', error)
           setEmployees([])
           return
         }
 
-        let needsRewrite = false
-        const updatedSource = [...list]
-
-        const filteredEmployees = list.filter((item: any, index: number) => {
-          if (!item) return false
-          const employeeOrgId = normalizeId(item.organization_id)
-          const matchesCanonical = canonicalOrgId && employeeOrgId === canonicalOrgId
-          const matchesAlternative = alternativeOrgIds.includes(employeeOrgId as string)
-
-          if (matchesCanonical) {
-            return true
-          }
-
-          if (matchesAlternative && canonicalOrgId) {
-            updatedSource[index] = {
-              ...item,
-              organization_id: canonicalOrgId,
-            }
-            needsRewrite = true
-            return true
-          }
-
-          return false
-        })
-
-        if (needsRewrite) {
-          localStorage.setItem('local_employees', JSON.stringify(updatedSource))
-        }
-
         setEmployees(
-          filteredEmployees.map((item: any) => ({
-            user_id: normalizeId(item.user_id) || normalizeId(item.id) || '',
-            organization_id: canonicalOrgId || normalizeId(item.organization_id),
-            organization_type: item.organization_type || null,
+          (data || []).map((item: any) => ({
+            user_id: item.user_id,
+            organization_id: item.organization_id,
+            organization_type: item.organizations?.organization_type || null,
             first_name: item.first_name || '',
             last_name: item.last_name || '',
             phone: item.phone || null,
             role: item.role || null,
-            created_at: item.created_at || item.updated_at,
+            created_at: item.created_at,
           }))
         )
       } catch (loadError) {
-        console.warn('Не удалось загрузить сотрудников из localStorage', loadError)
+        console.error('Не удалось загрузить сотрудников:', loadError)
         setEmployees([])
       }
     },
@@ -159,63 +149,80 @@ export const EmployeesPage = () => {
   )
 
   const loadInvites = useCallback(
-    (orgId: string | null, altOrgIds: string[] = []) => {
-      const canonicalOrgId = normalizeId(orgId)
-      const alternativeOrgIds = altOrgIds
-        .map(normalizeId)
-        .filter((id): id is string => Boolean(id) && id !== canonicalOrgId)
-
-      if (!canonicalOrgId && alternativeOrgIds.length === 0) {
+    async (orgId: string | null) => {
+      if (!orgId) {
         setInvites([])
         return
       }
 
-      const tokens = ensureEmployeeInviteTokens()
-      const activeInvites: EmployeeInviteToken[] = []
-      const usedInvites: EmployeeInviteToken[] = []
+      try {
+        const { data, error } = await supabase
+          .from('invite_tokens')
+          .select(`
+            id,
+            token,
+            invite_type,
+            created_at,
+            expires_at,
+            used_at,
+            revoked_at,
+            organization_invite_tokens (
+              organization_id,
+              organization_type,
+              employee_role
+            )
+          `)
+          .eq('invite_type', 'organization_employee')
+          .is('revoked_at', null)
+          .order('created_at', { ascending: false })
 
-      tokens.forEach(token => {
-        let tokenOrgId = normalizeId(token.organization_id)
-        const matchesCanonical = canonicalOrgId && tokenOrgId === canonicalOrgId
-        const matchesAlternative = alternativeOrgIds.includes(tokenOrgId as string)
-
-        if (matchesAlternative && canonicalOrgId) {
-          upsertEmployeeInviteToken({
-            ...token,
-            organization_id: canonicalOrgId,
-            organization_type: token.organization_type ?? null,
-          })
-          tokenOrgId = canonicalOrgId
-        }
-
-        if (canonicalOrgId && tokenOrgId !== canonicalOrgId) {
+        if (error) {
+          console.error('Ошибка загрузки приглашений:', error)
+          setInvites([])
           return
         }
 
-        if (token.used_at) {
-          usedInvites.push({ ...token, organization_id: canonicalOrgId ?? tokenOrgId ?? null })
-        } else {
-          activeInvites.push({ ...token, organization_id: canonicalOrgId ?? tokenOrgId ?? null })
+        // Фильтруем приглашения по organization_id
+        const filteredInvites = (data || [])
+          .filter((invite: any) => {
+            const inviteOrgId = invite.organization_invite_tokens?.organization_id
+            return inviteOrgId === orgId
+          })
+          .map((invite: any) => ({
+            id: invite.id,
+            token: invite.token,
+            invite_type: invite.invite_type,
+            created_at: invite.created_at,
+            expires_at: invite.expires_at,
+            used_at: invite.used_at,
+            revoked_at: invite.revoked_at,
+            organization_invite_tokens: invite.organization_invite_tokens,
+          }))
+
+        // Разделяем на активные и использованные
+        const activeInvites = filteredInvites.filter((invite: InviteToken) => !invite.used_at)
+        const usedInvites = filteredInvites.filter((invite: InviteToken) => invite.used_at)
+
+        // Показываем уведомление о последнем использованном приглашении
+        if (usedInvites.length > 0) {
+          const latest = usedInvites.reduce((acc, item) => {
+            if (!acc) return item
+            if (!item.used_at) return acc
+            if (!acc.used_at) return item
+            return new Date(item.used_at) > new Date(acc.used_at) ? item : acc
+          }, usedInvites[0])
+
+          setActivationNotice({
+            role: latest?.organization_invite_tokens?.employee_role || null,
+            used_at: latest?.used_at || null,
+          })
         }
-      })
 
-      if (usedInvites.length > 0) {
-        const latest = usedInvites.reduce((acc, item) => {
-          if (!acc) return item
-          if (!item.used_at) return acc
-          if (!acc.used_at) return item
-          return new Date(item.used_at) > new Date(acc.used_at) ? item : acc
-        }, usedInvites[0])
-
-        setActivationNotice({
-          role: latest?.role,
-          used_at: latest?.used_at,
-        })
-
-        usedInvites.forEach(token => deleteEmployeeInviteToken(token.token))
+        setInvites(activeInvites)
+      } catch (loadError) {
+        console.error('Не удалось загрузить приглашения:', loadError)
+        setInvites([])
       }
-
-      setInvites(activeInvites)
     },
     []
   )
@@ -275,9 +282,14 @@ export const EmployeesPage = () => {
     setOrganizationType(orgType)
     setOrganizationId(derivedOrganizationId)
     setOrganizationAltIds(alternativeOrganizationIds)
-    loadEmployees(derivedOrganizationId, alternativeOrganizationIds)
-    loadInvites(derivedOrganizationId, alternativeOrganizationIds)
-    setIsLoading(false)
+    
+    // Загружаем данные из Supabase
+    Promise.all([
+      loadEmployees(derivedOrganizationId),
+      loadInvites(derivedOrganizationId),
+    ]).finally(() => {
+      setIsLoading(false)
+    })
   }, [user, navigate, loadEmployees, loadInvites])
 
   useEffect(() => {
@@ -298,11 +310,54 @@ export const EmployeesPage = () => {
     }
   }
 
-  const handleDeleteInvite = (token: string) => {
+  const handleRemoveEmployee = async (employeeUserId: string) => {
+    if (!employeeUserId) return
+    const confirmed = window.confirm('Удалить сотрудника и отозвать его доступ?')
+    if (!confirmed) return
+
+    try {
+      // Удаляем сотрудника из организации
+      const { error: deleteError } = await supabase
+        .from('organization_employees')
+        .delete()
+        .eq('user_id', employeeUserId)
+        .eq('organization_id', organizationId)
+
+      if (deleteError) {
+        console.error('Ошибка удаления сотрудника:', deleteError)
+        setError('Не удалось удалить сотрудника. Попробуйте позже.')
+        return
+      }
+
+      // Перезагружаем список сотрудников
+      await loadEmployees(organizationId)
+    } catch (removeError) {
+      console.error('Не удалось удалить сотрудника', removeError)
+      setError('Не удалось удалить сотрудника. Попробуйте позже.')
+    }
+  }
+
+  const handleDeleteInvite = async (inviteId: string) => {
     const confirmed = window.confirm('Удалить пригласительную ссылку?')
     if (!confirmed) return
-    deleteEmployeeInviteToken(token)
-    loadInvites(organizationId, organizationAltIds)
+
+    try {
+      const { error } = await supabase.rpc('revoke_invite_link', {
+        p_invite_id: inviteId,
+      })
+
+      if (error) {
+        console.error('Ошибка отзыва приглашения:', error)
+        setError('Не удалось отозвать приглашение. Попробуйте позже.')
+        return
+      }
+
+      // Перезагружаем список приглашений
+      await loadInvites(organizationId)
+    } catch (deleteError) {
+      console.error('Ошибка при отзыве приглашения:', deleteError)
+      setError('Не удалось отозвать приглашение. Попробуйте позже.')
+    }
   }
 
   const handleGenerateInvite = async () => {
@@ -314,22 +369,30 @@ export const EmployeesPage = () => {
     setIsGenerating(true)
     setError(null)
     try {
-      const token = `org_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
-      const link = buildInviteLink(token)
-
-      upsertEmployeeInviteToken({
-        token,
-        organization_id: organizationId,
-        organization_type: organizationType ?? null,
-        role: selectedRole,
-        created_at: new Date().toISOString(),
-        used_at: null,
-        used_by: null,
-        link,
+      const { data, error } = await supabase.rpc('generate_invite_link', {
+        invite_type: 'organization_employee',
+        payload: {
+          employee_role: selectedRole,
+        },
       })
 
-      loadInvites(organizationId, organizationAltIds)
-      setCopiedToken(token)
+      if (error) {
+        console.error('Ошибка создания приглашения:', error)
+        setError(error.message || 'Не удалось создать пригласительную ссылку. Попробуйте позже.')
+        return
+      }
+
+      if (!data || !data.token) {
+        setError('Не удалось создать пригласительную ссылку. Попробуйте позже.')
+        return
+      }
+
+      const link = buildInviteLink(data.token)
+
+      // Перезагружаем список приглашений
+      await loadInvites(organizationId)
+      
+      setCopiedToken(data.token)
       await navigator.clipboard.writeText(link)
       setTimeout(() => setCopiedToken(null), 2000)
     } catch (generateError) {
@@ -340,57 +403,6 @@ export const EmployeesPage = () => {
     }
   }
 
-  const handleRemoveEmployee = (employeeId: string) => {
-    if (!employeeId) return
-    const confirmed = window.confirm('Удалить сотрудника и отозвать его доступ?')
-    if (!confirmed) return
-
-    try {
-      const employeesRaw = JSON.parse(localStorage.getItem('local_employees') || '[]')
-      const nextEmployees = Array.isArray(employeesRaw)
-        ? employeesRaw.filter((item: any) => normalizeId(item.user_id || item.id) !== normalizeId(employeeId))
-        : []
-      localStorage.setItem('local_employees', JSON.stringify(nextEmployees))
-
-      const usersRaw = JSON.parse(localStorage.getItem('local_users') || '[]')
-      if (Array.isArray(usersRaw)) {
-        const filteredUsers = usersRaw.filter((item: any) => normalizeId(item.id) !== normalizeId(employeeId))
-        localStorage.setItem('local_users', JSON.stringify(filteredUsers))
-      }
-
-      // Удаляем доступы к дневникам
-      try {
-        const assignmentsRaw = localStorage.getItem('diary_employee_access')
-        if (assignmentsRaw) {
-          const assignments = JSON.parse(assignmentsRaw)
-          if (assignments && typeof assignments === 'object') {
-            let changed = false
-            Object.keys(assignments).forEach(key => {
-              if (Array.isArray(assignments[key])) {
-                const next = assignments[key].filter(
-                  (entry: any) => normalizeId(entry.user_id) !== normalizeId(employeeId)
-                )
-                if (next.length !== assignments[key].length) {
-                  assignments[key] = next
-                  changed = true
-                }
-              }
-            })
-            if (changed) {
-              localStorage.setItem('diary_employee_access', JSON.stringify(assignments))
-            }
-          }
-        }
-      } catch (accessError) {
-        console.warn('Не удалось обновить доступ сотрудников к дневникам', accessError)
-      }
-
-      loadEmployees(organizationId, organizationAltIds)
-    } catch (removeError) {
-      console.error('Не удалось удалить сотрудника', removeError)
-      setError('Не удалось удалить сотрудника. Попробуйте позже.')
-    }
-  }
 
   if (isLoading) {
     return (
@@ -482,13 +494,14 @@ export const EmployeesPage = () => {
             <div className="space-y-4">
               {invites.map(invite => {
                 const token = invite.token
-                const link = invite.link || buildInviteLink(invite.token)
+                const link = buildInviteLink(invite.token)
+                const role = invite.organization_invite_tokens?.employee_role || ''
                 return (
-                  <div key={token} className="bg-white rounded-2xl shadow-sm p-4">
+                  <div key={invite.id} className="bg-white rounded-2xl shadow-sm p-4">
                     <div className="flex justify-between items-start gap-3">
                       <div>
                         <p className="text-sm font-semibold text-gray-dark">
-                          {ROLE_LABELS[invite.role || ''] || 'Сотрудник'}
+                          {ROLE_LABELS[role] || 'Сотрудник'}
                         </p>
                         <p className="text-xs text-gray-500 mt-1">Создано: {formatDate(invite.created_at)}</p>
                         <p className="text-xs text-gray-500 break-all mt-2">{link}</p>
@@ -497,7 +510,7 @@ export const EmployeesPage = () => {
                         <Button size="sm" onClick={() => handleCopyInvite(token)}>
                           {copiedToken === token ? 'Скопировано' : 'Скопировать'}
                         </Button>
-                        <Button size="sm" variant="secondary" onClick={() => handleDeleteInvite(token)}>
+                        <Button size="sm" variant="secondary" onClick={() => handleDeleteInvite(invite.id)}>
                           Удалить
                         </Button>
                       </div>
