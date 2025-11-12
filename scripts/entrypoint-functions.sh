@@ -12,7 +12,17 @@ fi
 echo "✅ Functions found in /var/functions"
 ls -la /var/functions/
 
-# Запускаем Edge Runtime с указанием пути к функциям
-# --main-service указывает путь к директории с функциями
-exec edge-runtime start --main-service /var/functions --verbose
+# Edge Runtime ожидает конкретную функцию, а не родительскую директорию
+# Используем первую найденную функцию (accept-invite)
+FUNCTION_DIR="/var/functions/accept-invite"
+
+if [ ! -f "$FUNCTION_DIR/index.ts" ]; then
+  echo "❌ ERROR: Function index.ts not found in $FUNCTION_DIR"
+  exit 1
+fi
+
+echo "🚀 Starting Edge Runtime with function: $FUNCTION_DIR"
+
+# Запускаем Edge Runtime с указанием пути к конкретной функции
+exec edge-runtime start --main-service "$FUNCTION_DIR" --verbose
 
