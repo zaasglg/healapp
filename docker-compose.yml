@@ -152,8 +152,26 @@ services:
   #     IMGPROXY_ENABLE_WEBP_DETECTION: "true"
   #     IMGPROXY_MAX_ANIMATION_FRAMES: 30
 
-  # Edge Functions временно отключены - требуют volumes
-  # Для работы нужно задеплоить их через Supabase CLI
+  functions:
+    image: supabase/edge-runtime:v1.43.2
+    restart: unless-stopped
+    command: start
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    environment:
+      EDGE_FUNCTIONS: "true"
+      SUPABASE_URL: ${SUPABASE_SITE_URL:-http://localhost:54321}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
+      JWT_SECRET: ${SUPABASE_JWT_SECRET}
+    ports:
+      - "${SUPABASE_FUNCTIONS_PORT:-54325}:9000"
+    # volumes не используются из-за ограничений Timeweb Cloud
+    # Функции будут скопированы в контейнер через init скрипт
 
   studio:
     image: supabase/studio:latest
