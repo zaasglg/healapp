@@ -157,8 +157,7 @@ services:
       context: .
       dockerfile: Dockerfile.functions
     restart: unless-stopped
-    command: start
-    # Важно: не монтируем volumes, используем только функции из образа
+    # Entrypoint скрипт уже установлен в Dockerfile
     init: true
     depends_on:
       db:

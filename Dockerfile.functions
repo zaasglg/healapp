@@ -1,10 +1,7 @@
 FROM supabase/edge-runtime:v1.43.2
 
 # Официальный Supabase использует /home/deno/functions для Edge Functions
-# Создаем директорию и копируем функции
-RUN mkdir -p /home/deno/functions
-
-# Копируем функции с сохранением структуры
+# Копируем функции в образ
 COPY supabase/functions/ /home/deno/functions/
 
 # Проверяем что скопировалось
