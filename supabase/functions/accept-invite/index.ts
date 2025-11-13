@@ -245,7 +245,7 @@ async function handleOrganizationEmployee(
 async function handleOrganizationClient(
   client: SupabaseClient,
   invite: InviteRecord,
-  payload: Required<Pick<AcceptInviteRequest, "password" | "firstName" | "lastName">> & { phone?: string; email?: string }
+  payload: Required<Pick<AcceptInviteRequest, "password">> & { phone?: string; email?: string; firstName?: string; lastName?: string }
 ): Promise<HandlerResult> {
   const metaRaw = invite.organization_client_invite_tokens;
   const meta = Array.isArray(metaRaw) ? metaRaw[0] : metaRaw;
@@ -283,8 +283,8 @@ async function handleOrganizationClient(
       user_id: user.id,
       invited_by_organization_id: meta.organization_id,
       phone,
-      first_name: payload.firstName,
-      last_name: payload.lastName,
+      first_name: payload.firstName || "",
+      last_name: payload.lastName || "",
     })
     .select("id")
     .single();
@@ -324,7 +324,9 @@ async function handleOrganizationClient(
   }
 
   // Обновляем organization_client_invite_tokens с данными зарегистрированного клиента
-  const invitedName = `${payload.firstName} ${payload.lastName}`.trim() || null;
+  const invitedName = (payload.firstName && payload.lastName) 
+    ? `${payload.firstName} ${payload.lastName}`.trim() 
+    : null;
   const { error: updateInviteTokenError } = await client
     .from("organization_client_invite_tokens")
     .update({
@@ -357,7 +359,7 @@ async function handleOrganizationClient(
 async function handleCaregiverClient(
   client: SupabaseClient,
   invite: InviteRecord,
-  payload: Required<Pick<AcceptInviteRequest, "password" | "firstName" | "lastName">> & { phone?: string; email?: string }
+  payload: Required<Pick<AcceptInviteRequest, "password">> & { phone?: string; email?: string; firstName?: string; lastName?: string }
 ): Promise<HandlerResult> {
   const metaRaw = invite.caregiver_client_invite_tokens;
   const meta = Array.isArray(metaRaw) ? metaRaw[0] : metaRaw;
@@ -393,8 +395,8 @@ async function handleCaregiverClient(
       user_id: user.id,
       invited_by_caregiver_id: meta.caregiver_id,
       phone,
-      first_name: payload.firstName,
-      last_name: payload.lastName,
+      first_name: payload.firstName || "",
+      last_name: payload.lastName || "",
     })
     .select("id")
     .single();
@@ -412,7 +414,9 @@ async function handleCaregiverClient(
   if (profileError) throw profileError;
 
   // Обновляем caregiver_client_invite_tokens с данными зарегистрированного клиента
-  const invitedName = `${payload.firstName} ${payload.lastName}`.trim() || null;
+  const invitedName = (payload.firstName && payload.lastName) 
+    ? `${payload.firstName} ${payload.lastName}`.trim() 
+    : null;
   const { error: updateInviteTokenError } = await client
     .from("caregiver_client_invite_tokens")
     .update({
@@ -466,27 +470,21 @@ async function acceptInviteHandler(client: SupabaseClient, payload: AcceptInvite
       });
     }
     case "organization_client": {
-      // Для клиентов firstName и lastName обязательны
-      if (!firstName || !lastName) {
-        throw new Response("firstName and lastName are required for client invite", { status: 400 });
-      }
+      // Для клиентов firstName и lastName опциональны (заполняются в ProfileSetupPage)
       return await handleOrganizationClient(client, invite, {
         password,
-        firstName,
-        lastName,
+        firstName: firstName || undefined,
+        lastName: lastName || undefined,
         phone: payload.phone,
         email: payload.email,
       });
     }
     case "caregiver_client": {
-      // Для клиентов firstName и lastName обязательны
-      if (!firstName || !lastName) {
-        throw new Response("firstName and lastName are required for client invite", { status: 400 });
-      }
+      // Для клиентов firstName и lastName опциональны (заполняются в ProfileSetupPage)
       return await handleCaregiverClient(client, invite, {
         password,
-        firstName,
-        lastName,
+        firstName: firstName || undefined,
+        lastName: lastName || undefined,
         phone: payload.phone,
         email: payload.email,
       });
