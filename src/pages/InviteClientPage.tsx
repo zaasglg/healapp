@@ -28,74 +28,68 @@ export const InviteClientPage = () => {
     }
   }, [user, navigate])
 
-  const generateToken = () => {
-    // Генерируем уникальный токен
-    return `client_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`
-  }
+  // Убрано: generateToken - токен теперь генерируется на бэкенде через RPC
 
   const createInviteLink = async () => {
     if (!user) return
 
     setIsCreating(true)
     try {
-      // Временное решение: используем user.id как caregiver_id
-      // Для сиделки caregiver_id = user.id (так как сиделка - это организация с типом 'caregiver')
-      // TODO: После создания таблицы organizations в БД, можно будет получать id из таблицы:
-      /*
-      const { data: orgData, error: orgError } = await supabase
+      // Убеждаемся, что у сиделки есть запись в organizations
+      // Это нужно для работы current_organization_id() в RPC функции
+      const { data: existingOrg, error: checkError } = await supabase
         .from('organizations')
         .select('id')
         .eq('user_id', user.id)
-        .eq('type', 'caregiver')
+        .eq('organization_type', 'caregiver')
         .single()
 
-      if (orgError || !orgData) {
-        console.error('Error loading caregiver:', orgError)
-        alert('Ошибка при создании ссылки. Попробуйте позже.')
-        setIsCreating(false)
-        return
-      }
-      const caregiverId = orgData.id
-      */
-      
-      // Временное решение: используем user.id как caregiver_id
-      const caregiverId = user.id
-
-      const token = generateToken()
-      
-      // TODO: После создания таблицы caregiver_client_invite_tokens в БД, раскомментировать:
-      /*
-      const { error: insertError } = await supabase
-        .from('caregiver_client_invite_tokens')
-        .insert({
-          token,
-          caregiver_id: caregiverId,
-          created_by: user.id,
+      if (checkError && checkError.code === 'PGRST116') {
+        // Записи нет, создаем ее через RPC
+        console.log('InviteClientPage: Организация не найдена, создаем через RPC')
+        const { data: createdOrg, error: rpcCreateError } = await supabase.rpc('create_organization', {
+          p_organization_type: 'caregiver',
+          p_name: `${user.user_metadata?.firstName || ''} ${user.user_metadata?.lastName || ''}`.trim() || user.email || 'Сиделка',
+          p_phone: user.user_metadata?.phone || user.email || '',
+          p_address: null,
         })
 
-      if (insertError) {
-        console.error('Error creating invite token:', insertError)
-        alert('Ошибка при создании ссылки. Попробуйте позже.')
+        if (rpcCreateError) {
+          console.error('Ошибка создания организации через RPC:', rpcCreateError)
+          alert('Не удалось создать запись организации. Обратитесь в поддержку.')
+          setIsCreating(false)
+          return
+        }
+        console.log('✅ Организация создана через RPC:', createdOrg)
+      } else if (checkError) {
+        console.error('Ошибка проверки организации:', checkError)
+        alert('Ошибка при проверке организации. Попробуйте позже.')
         setIsCreating(false)
         return
       }
-      */
 
-      // Временное решение: сохраняем в localStorage
-      const inviteTokens = JSON.parse(localStorage.getItem('caregiver_client_invite_tokens') || '[]')
-      inviteTokens.push({
-        id: `temp_${Date.now()}`,
-        token,
-        caregiver_id: caregiverId, // Используем user.id как caregiver_id
-        created_by: user.id,
-        created_at: new Date().toISOString(),
-        used_at: null,
-        used_by: null,
+      // Используем RPC функцию для создания пригласительной ссылки
+      // RPC функция автоматически определит organization_id через current_organization_id()
+      const { data: inviteToken, error: rpcError } = await supabase.rpc('generate_invite_link', {
+        invite_type: 'caregiver_client',
+        payload: {
+          // Для caregiver_client не требуется patient_card_id или diary_id
+          // Эти поля опциональны и могут быть заполнены позже
+        },
       })
-      localStorage.setItem('caregiver_client_invite_tokens', JSON.stringify(inviteTokens))
 
-      const link = `${window.location.origin}/client-invite?token=${token}`
+      if (rpcError || !inviteToken) {
+        console.error('Error creating invite token via RPC:', rpcError)
+        alert(rpcError?.message || 'Ошибка при создании ссылки. Попробуйте позже.')
+        setIsCreating(false)
+        return
+      }
+
+      // Формируем ссылку с токеном
+      const link = `${window.location.origin}/client-invite?token=${inviteToken.token}`
       setInviteLink(link)
+      
+      console.log('✅ Пригласительная ссылка создана:', link)
     } catch (err) {
       console.error('Error creating invite link:', err)
       alert('Ошибка при создании ссылки. Попробуйте позже.')
