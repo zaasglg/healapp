@@ -1,6 +1,4 @@
-/// <reference types="https://deno.land/std@0.224.0/types.d.ts" />
-
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+// @ts-ignore - ESM import
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 type InviteType = "organization_employee" | "organization_client" | "caregiver_client" | "admin_static";
@@ -22,6 +20,27 @@ type HandlerResult = {
   organizationId?: string;
   clientId?: string;
   loginPhone: string;
+  loginEmail: string; // Email для входа (псевдо-email)
+};
+
+type OrganizationInviteToken = {
+  organization_id: string;
+  organization_type: "pension" | "patronage_agency" | "caregiver";
+  employee_role: "admin" | "manager" | "doctor" | "caregiver";
+};
+
+type CaregiverClientInviteToken = {
+  caregiver_id: string;
+  invited_client_phone: string | null;
+  invited_client_name: string | null;
+};
+
+type OrganizationClientInviteToken = {
+  organization_id: string;
+  patient_card_id: string;
+  diary_id: string | null;
+  invited_client_phone: string | null;
+  invited_client_name: string | null;
 };
 
 type InviteRecord = {
@@ -32,27 +51,16 @@ type InviteRecord = {
   used_at: string | null;
   revoked_at: string | null;
   metadata: Record<string, unknown> | null;
-  organization_invite_tokens?: {
-    organization_id: string;
-    organization_type: "pension" | "patronage_agency" | "caregiver";
-    employee_role: "admin" | "manager" | "doctor" | "caregiver";
-  } | null;
-  caregiver_client_invite_tokens?: {
-    caregiver_id: string;
-    invited_client_phone: string | null;
-    invited_client_name: string | null;
-  } | null;
-  organization_client_invite_tokens?: {
-    organization_id: string;
-    patient_card_id: string;
-    diary_id: string | null;
-    invited_client_phone: string | null;
-    invited_client_name: string | null;
-  } | null;
+  organization_invite_tokens?: OrganizationInviteToken | OrganizationInviteToken[] | null;
+  caregiver_client_invite_tokens?: CaregiverClientInviteToken | CaregiverClientInviteToken[] | null;
+  organization_client_invite_tokens?: OrganizationClientInviteToken | OrganizationClientInviteToken[] | null;
 };
 
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+// @ts-ignore - Deno global
+// В облачном Supabase эти переменные доступны автоматически
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || Deno.env.get("SUPABASE_PROJECT_URL");
+// @ts-ignore - Deno global
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SERVICE_KEY");
 
 type ErrorBody = { message: string; code?: string };
 
@@ -83,9 +91,9 @@ async function fetchInvite(client: SupabaseClient, token: string): Promise<Invit
     .from("invite_tokens")
     .select(
       `id, token, invite_type, expires_at, used_at, revoked_at, metadata,
-       organization_invite_tokens!inner(organization_id, organization_type, employee_role),
-       organization_client_invite_tokens!left(organization_id, patient_card_id, diary_id, invited_client_phone, invited_client_name),
-       caregiver_client_invite_tokens!left(caregiver_id, invited_client_phone, invited_client_name)`
+       organization_invite_tokens(organization_id, organization_type, employee_role),
+       organization_client_invite_tokens(organization_id, patient_card_id, diary_id, invited_client_phone, invited_client_name),
+       caregiver_client_invite_tokens(caregiver_id, invited_client_phone, invited_client_name)`
     )
     .eq("token", token)
     .maybeSingle();
@@ -144,17 +152,21 @@ async function createSession(
     | { phone: string; password: string }
     | { email: string; password: string }
 ) {
-  const { data, error } = await client.auth.signInWithPassword(credentials as never);
+  const { data, error } = await client.auth.signInWithPassword(credentials);
   if (error) throw error;
-  return data.session;
+  return data?.session ?? null;
 }
 
 async function handleOrganizationEmployee(
   client: SupabaseClient,
   invite: InviteRecord,
-  payload: Required<Pick<AcceptInviteRequest, "password" | "firstName" | "lastName" | "phone">>
+  payload: Required<Pick<AcceptInviteRequest, "password" | "phone">> & {
+    firstName?: string;
+    lastName?: string;
+  }
 ): Promise<HandlerResult> {
-  const meta = invite.organization_invite_tokens;
+  const metaRaw = invite.organization_invite_tokens;
+  const meta = Array.isArray(metaRaw) ? metaRaw[0] : metaRaw;
   if (!meta) {
     throw new Response("Invite metadata missing", { status: 400 });
   }
@@ -181,6 +193,7 @@ async function handleOrganizationEmployee(
       user_id: user.id,
       role: "org_employee",
       organization_id: meta.organization_id,
+      phone_e164: normalizedPhone, // Сохраняем телефон в user_profiles
       metadata: { source_invite: invite.token },
     }),
     client.from("organization_employees").insert({
@@ -188,14 +201,34 @@ async function handleOrganizationEmployee(
       organization_id: meta.organization_id,
       role: meta.employee_role,
       phone: normalizedPhone,
-      first_name: payload.firstName,
-      last_name: payload.lastName,
+      first_name: payload.firstName || "",
+      last_name: payload.lastName || "",
     }),
   ];
 
   for (const op of inserts) {
     const { error } = await op;
     if (error) throw error;
+  }
+
+  // Обновляем organization_invite_tokens с данными зарегистрированного сотрудника
+  const invitedName = [payload.firstName, payload.lastName].filter(Boolean).join(" ") || null;
+  const { error: updateInviteTokenError } = await client
+    .from("organization_invite_tokens")
+    .update({
+      invited_phone: normalizedPhone,
+      invited_email: pseudoEmail,
+      invited_name: invitedName,
+      metadata: {
+        registered_at: new Date().toISOString(),
+        user_id: user.id,
+      },
+    })
+    .eq("invite_id", invite.id);
+
+  if (updateInviteTokenError) {
+    console.error("Error updating organization_invite_tokens:", updateInviteTokenError);
+    // Не прерываем выполнение, так как это не критично
   }
 
   await markInviteUsed(client, invite.id, user.id);
@@ -205,15 +238,17 @@ async function handleOrganizationEmployee(
     role: "org_employee",
     organizationId: meta.organization_id,
     loginPhone: normalizedPhone,
+    loginEmail: pseudoEmail, // Сохраняем email для входа
   };
 }
 
 async function handleOrganizationClient(
   client: SupabaseClient,
   invite: InviteRecord,
-  payload: Required<Pick<AcceptInviteRequest, "password" | "firstName" | "lastName">> & { phone?: string }
+  payload: Required<Pick<AcceptInviteRequest, "password" | "firstName" | "lastName">> & { phone?: string; email?: string }
 ): Promise<HandlerResult> {
-  const meta = invite.organization_client_invite_tokens;
+  const metaRaw = invite.organization_client_invite_tokens;
+  const meta = Array.isArray(metaRaw) ? metaRaw[0] : metaRaw;
   if (!meta) {
     throw new Response("Invite metadata missing", { status: 400 });
   }
@@ -226,9 +261,12 @@ async function handleOrganizationClient(
   const pseudoEmail = phone
     ? buildPseudoEmail(phone, "organization_client")
     : `${crypto.randomUUID()}@client.diary.local`;
+  
+  // Используем переданный email или псевдо-email
+  const finalEmail = payload.email ?? pseudoEmail;
 
   const user = await createAuthUser(client, {
-    email: payload.email ?? pseudoEmail,
+    email: finalEmail,
     password: payload.password,
     phone,
     userMetadata: {
@@ -259,6 +297,7 @@ async function handleOrganizationClient(
       user_id: user.id,
       role: "client",
       client_id: clientId,
+      phone_e164: phone, // Сохраняем телефон в user_profiles
       metadata: { source_invite: invite.token },
     }),
     client
@@ -284,6 +323,26 @@ async function handleOrganizationClient(
     }
   }
 
+  // Обновляем organization_client_invite_tokens с данными зарегистрированного клиента
+  const invitedName = `${payload.firstName} ${payload.lastName}`.trim() || null;
+  const { error: updateInviteTokenError } = await client
+    .from("organization_client_invite_tokens")
+    .update({
+      invited_client_phone: phone,
+      invited_client_name: invitedName,
+      metadata: {
+        registered_at: new Date().toISOString(),
+        user_id: user.id,
+        client_id: clientId,
+      },
+    })
+    .eq("invite_id", invite.id);
+
+  if (updateInviteTokenError) {
+    console.error("Error updating organization_client_invite_tokens:", updateInviteTokenError);
+    // Не прерываем выполнение, так как это не критично
+  }
+
   await markInviteUsed(client, invite.id, user.id);
 
   return {
@@ -291,15 +350,17 @@ async function handleOrganizationClient(
     role: "client",
     clientId,
     loginPhone: phone,
+    loginEmail: finalEmail, // Сохраняем email для входа
   };
 }
 
 async function handleCaregiverClient(
   client: SupabaseClient,
   invite: InviteRecord,
-  payload: Required<Pick<AcceptInviteRequest, "password" | "firstName" | "lastName">> & { phone?: string }
+  payload: Required<Pick<AcceptInviteRequest, "password" | "firstName" | "lastName">> & { phone?: string; email?: string }
 ): Promise<HandlerResult> {
-  const meta = invite.caregiver_client_invite_tokens;
+  const metaRaw = invite.caregiver_client_invite_tokens;
+  const meta = Array.isArray(metaRaw) ? metaRaw[0] : metaRaw;
   if (!meta) {
     throw new Response("Invite metadata missing", { status: 400 });
   }
@@ -310,9 +371,12 @@ async function handleCaregiverClient(
   }
   const phone = normalizePhone(phoneRaw);
   const pseudoEmail = buildPseudoEmail(phone, "caregiver_client");
+  
+  // Используем переданный email или псевдо-email
+  const finalEmail = payload.email ?? pseudoEmail;
 
   const user = await createAuthUser(client, {
-    email: payload.email ?? pseudoEmail,
+    email: finalEmail,
     password: payload.password,
     phone,
     userMetadata: {
@@ -342,9 +406,30 @@ async function handleCaregiverClient(
     user_id: user.id,
     role: "client",
     client_id: clientId,
+    phone_e164: phone, // Сохраняем телефон в user_profiles
     metadata: { source_invite: invite.token },
   });
   if (profileError) throw profileError;
+
+  // Обновляем caregiver_client_invite_tokens с данными зарегистрированного клиента
+  const invitedName = `${payload.firstName} ${payload.lastName}`.trim() || null;
+  const { error: updateInviteTokenError } = await client
+    .from("caregiver_client_invite_tokens")
+    .update({
+      invited_client_phone: phone,
+      invited_client_name: invitedName,
+      metadata: {
+        registered_at: new Date().toISOString(),
+        user_id: user.id,
+        client_id: clientId,
+      },
+    })
+    .eq("invite_id", invite.id);
+
+  if (updateInviteTokenError) {
+    console.error("Error updating caregiver_client_invite_tokens:", updateInviteTokenError);
+    // Не прерываем выполнение, так как это не критично
+  }
 
   await markInviteUsed(client, invite.id, user.id);
 
@@ -353,6 +438,7 @@ async function handleCaregiverClient(
     role: "client",
     clientId,
     loginPhone: phone,
+    loginEmail: finalEmail, // Сохраняем email для входа
   };
 }
 
@@ -360,9 +446,6 @@ async function acceptInviteHandler(client: SupabaseClient, payload: AcceptInvite
   const { token, password, firstName, lastName } = payload;
   if (!token || !password) {
     throw new Response("token and password are required", { status: 400 });
-  }
-  if (!firstName || !lastName) {
-    throw new Response("firstName and lastName are required", { status: 400 });
   }
 
   const invite = await fetchInvite(client, token);
@@ -374,14 +457,19 @@ async function acceptInviteHandler(client: SupabaseClient, payload: AcceptInvite
       if (!phone) {
         throw new Response("phone is required for employee invite", { status: 400 });
       }
+      // firstName и lastName опциональны для сотрудников (заполняются в ProfileSetupPage)
       return await handleOrganizationEmployee(client, invite, {
         password,
-        firstName,
-        lastName,
         phone,
+        firstName: firstName || undefined,
+        lastName: lastName || undefined,
       });
     }
     case "organization_client": {
+      // Для клиентов firstName и lastName обязательны
+      if (!firstName || !lastName) {
+        throw new Response("firstName and lastName are required for client invite", { status: 400 });
+      }
       return await handleOrganizationClient(client, invite, {
         password,
         firstName,
@@ -391,6 +479,10 @@ async function acceptInviteHandler(client: SupabaseClient, payload: AcceptInvite
       });
     }
     case "caregiver_client": {
+      // Для клиентов firstName и lastName обязательны
+      if (!firstName || !lastName) {
+        throw new Response("firstName and lastName are required for client invite", { status: 400 });
+      }
       return await handleCaregiverClient(client, invite, {
         password,
         firstName,
@@ -404,10 +496,43 @@ async function acceptInviteHandler(client: SupabaseClient, payload: AcceptInvite
   }
 }
 
-serve(async (req: Request) => {
+// CORS заголовки
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-requested-with",
+  "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
+  "Access-Control-Max-Age": "86400",
+  "Access-Control-Allow-Credentials": "true",
+};
+
+function corsResponse(body: unknown, init: ResponseInit = {}): Response {
+  const headers = new Headers(init.headers);
+  Object.entries(corsHeaders).forEach(([key, value]) => {
+    headers.set(key, value);
+  });
+  headers.set("Content-Type", "application/json; charset=utf-8");
+  return new Response(JSON.stringify(body), { ...init, headers });
+}
+
+// @ts-ignore - Deno global
+Deno.serve(async (req: Request) => {
+  // Логируем входящий запрос для отладки
+  console.log(`[accept-invite] ${req.method} ${req.url}`);
+  console.log(`[accept-invite] Headers:`, Object.fromEntries(req.headers.entries()));
+  
+  // Обработка preflight CORS запроса (должен быть первым)
+  // Согласно документации Supabase, для OPTIONS нужно возвращать статус 200
+  if (req.method === "OPTIONS") {
+    console.log("[accept-invite] Handling OPTIONS preflight request");
+    return new Response("ok", {
+      status: 200,
+      headers: corsHeaders,
+    });
+  }
+
   try {
     if (req.method !== "POST") {
-      return new Response("Method Not Allowed", { status: 405 });
+      return corsResponse({ error: "Method Not Allowed" }, { status: 405 });
     }
 
     const client = createClient(
@@ -421,17 +546,30 @@ serve(async (req: Request) => {
       }
     );
 
-    const payload = (await req.json()) as AcceptInviteRequest;
+    // Парсим JSON с обработкой ошибок
+    let payload: AcceptInviteRequest;
+    try {
+      payload = (await req.json()) as AcceptInviteRequest;
+    } catch (jsonError) {
+      console.error("JSON parse error:", jsonError);
+      return corsResponse(
+        { error: "Invalid JSON in request body" },
+        { status: 400 }
+      );
+    }
+
     const result = await acceptInviteHandler(client, payload);
 
+    // Используем email для входа, так как phone logins могут быть отключены
     const session = await createSession(client, {
-      phone: result.loginPhone,
+      email: result.loginEmail,
       password: payload.password!,
     });
 
-    const { loginPhone, ...sanitized } = result;
+    // Убираем loginPhone и loginEmail из ответа (не нужны на фронтенде)
+    const { loginPhone, loginEmail, ...sanitized } = result;
 
-    return jsonResponse({
+    return corsResponse({
       success: true,
       data: {
         ...sanitized,
@@ -448,12 +586,21 @@ serve(async (req: Request) => {
     });
   } catch (error) {
     if (error instanceof Response) {
-      return error;
+      // Добавляем CORS заголовки к существующему Response
+      const headers = new Headers(error.headers);
+      Object.entries(corsHeaders).forEach(([key, value]) => {
+        headers.set(key, value);
+      });
+      return new Response(error.body, {
+        status: error.status,
+        statusText: error.statusText,
+        headers,
+      });
     }
     console.error("accept-invite error", error);
     const body: ErrorBody = {
       message: error instanceof Error ? error.message : "Unexpected error",
     };
-    return jsonResponse(body, { status: 500 });
+    return corsResponse(body, { status: 500 });
   }
 });
