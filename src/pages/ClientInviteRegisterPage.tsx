@@ -5,21 +5,10 @@ import { z } from 'zod'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Button, Input } from '@/components/ui'
 import { useAuthStore } from '@/store/authStore'
-import {
-  normalizeClientLink,
-  attachClientToDiary,
-  type DiaryClientLink,
-} from '@/utils/diaryClientLink'
+import { supabase } from '@/lib/supabase'
+// Убрано: импорты localStorage утилит (все через бэкенд)
 
-interface DiaryRecord {
-  id: string
-  owner_id: string
-  client_id: string
-  patient_card_id: string
-  organization_id: string | null
-  caregiver_id: string | null
-  created_at: string
-}
+// Убрано: DiaryRecord (теперь используется тип из Supabase)
 
 const clientRegisterSchema = z
   .object({
@@ -55,48 +44,7 @@ const formatPhone = (raw: string) => {
   return value
 }
 
-const createClientId = () =>
-  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `client_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
-
-interface ValidationResult {
-  link: DiaryClientLink
-  diary: DiaryRecord
-}
-
-const validateInvite = (
-  diaryId: string,
-  token: string,
-  originDiary?: DiaryRecord
-): ValidationResult | null => {
-  try {
-    const storedLinksRaw = localStorage.getItem('diary_client_links')
-    const storedLinks = storedLinksRaw ? JSON.parse(storedLinksRaw) : {}
-    const entryRaw = storedLinks?.[diaryId]
-    const normalized = normalizeClientLink(entryRaw, {
-      diaryId,
-      patientCardId: originDiary?.patient_card_id ?? null,
-      organizationId: originDiary?.organization_id ?? null,
-    })
-    if (!normalized || normalized.token !== token) {
-      return null
-    }
-    const diariesRaw = localStorage.getItem('diaries')
-    const diaries: DiaryRecord[] = diariesRaw ? JSON.parse(diariesRaw) : []
-    const diary =
-      originDiary ||
-      diaries.find(record => String(record.id) === String(diaryId)) ||
-      null
-    if (!diary) {
-      return null
-    }
-    return { link: normalized, diary }
-  } catch (error) {
-    console.warn('Ошибка проверки ссылки клиента', error)
-    return null
-  }
-}
+// Убрано: createClientId и validateInvite (теперь все через бэкенд)
 
 export const ClientInviteRegisterPage = () => {
   const navigate = useNavigate()
@@ -104,14 +52,13 @@ export const ClientInviteRegisterPage = () => {
   const { setUser } = useAuthStore()
   const diaryId = searchParams.get('diary') || ''
   const token = searchParams.get('token') || ''
-  const flowType: 'organization' | 'caregiver' = diaryId ? 'organization' : 'caregiver'
+  // flowType будет определен после валидации токена
+  const [flowType, setFlowType] = useState<'organization' | 'caregiver' | null>(null)
 
   const [status, setStatus] = useState<'loading' | 'invalid' | 'form' | 'processing'>('loading')
   const [error, setError] = useState<string | null>(null)
-  const [linkInfo, setLinkInfo] = useState<DiaryClientLink | null>(null)
-  const [diaryInfo, setDiaryInfo] = useState<DiaryRecord | null>(null)
-  const [caregiverInvite, setCaregiverInvite] = useState<any | null>(null)
-  const [caregiverUser, setCaregiverUser] = useState<any | null>(null)
+  const [inviteData, setInviteData] = useState<any | null>(null)
+  const [diaryInfo, setDiaryInfo] = useState<any | null>(null)
 
   const {
     register,
@@ -128,82 +75,107 @@ export const ClientInviteRegisterPage = () => {
       return
     }
 
-    if (flowType === 'caregiver') {
+    const validateInvite = async () => {
       try {
-        const tokensRaw = localStorage.getItem('caregiver_client_invite_tokens')
-        const tokens = tokensRaw ? JSON.parse(tokensRaw) : []
-        const invite = tokens.find((item: any) => String(item.token) === String(token))
+        // Сначала проверяем токен без фильтрации по типу, чтобы определить тип приглашения
+        const { data, error: inviteError } = await supabase
+          .from('invite_tokens')
+          .select(`
+            id,
+            token,
+            invite_type,
+            expires_at,
+            used_at,
+            revoked_at,
+            organization_client_invite_tokens (
+              organization_id,
+              patient_card_id,
+              diary_id,
+              invited_client_phone,
+              invited_client_name
+            ),
+            caregiver_client_invite_tokens (
+              caregiver_id,
+              invited_client_phone,
+              invited_client_name
+            )
+          `)
+          .eq('token', token)
+          .in('invite_type', ['organization_client', 'caregiver_client'])
+          .is('revoked_at', null)
+          .single()
 
-        if (!invite) {
+        if (inviteError || !data) {
+          console.error('ClientInviteRegisterPage: Token validation error:', inviteError)
           setStatus('invalid')
           setError('Пригласительная ссылка недействительна или была удалена.')
           return
         }
 
-        if (invite.used_at) {
+        // Определяем тип приглашения по данным токена
+        const detectedInviteType = data.invite_type as 'organization_client' | 'caregiver_client'
+        
+        if (detectedInviteType === 'organization_client') {
+          setFlowType('organization')
+        } else if (detectedInviteType === 'caregiver_client') {
+          setFlowType('caregiver')
+        } else {
+          setStatus('invalid')
+          setError('Неверный тип пригласительной ссылки.')
+          return
+        }
+
+        if (data.used_at) {
           setStatus('invalid')
           setError('Эта пригласительная ссылка уже была использована.')
           return
         }
 
-        setCaregiverInvite(invite)
+        if (data.expires_at && new Date(data.expires_at) < new Date()) {
+          setStatus('invalid')
+          setError('Срок действия пригласительной ссылки истек.')
+          return
+        }
 
-        try {
-          const usersRaw = localStorage.getItem('local_users')
-          const users = usersRaw ? JSON.parse(usersRaw) : []
-          const caregiver = users.find((u: any) => String(u.id) === String(invite.caregiver_id))
-          if (caregiver) {
-            setCaregiverUser(caregiver)
+        setInviteData(data)
+
+        // Если это приглашение от организации, загружаем информацию о дневнике
+        // organization_client_invite_tokens может быть массивом или объектом
+        const orgClientInviteData = Array.isArray(data.organization_client_invite_tokens)
+          ? data.organization_client_invite_tokens[0]
+          : data.organization_client_invite_tokens
+        
+        if (detectedInviteType === 'organization_client' && orgClientInviteData?.diary_id) {
+          const { data: diary, error: diaryError } = await supabase
+            .from('diaries')
+            .select(`
+              id,
+              patient_card_id,
+              organization_id,
+              caregiver_id,
+              owner_client_id
+            `)
+            .eq('id', orgClientInviteData.diary_id)
+            .single()
+
+          if (!diaryError && diary) {
+            setDiaryInfo(diary)
           }
-        } catch (userError) {
-          console.log('Не удалось загрузить данные сиделки', userError)
         }
 
         setStatus('form')
       } catch (err) {
-        console.error('Ошибка проверки пригласительной ссылки сиделки', err)
+        console.error('Ошибка проверки пригласительной ссылки', err)
         setStatus('invalid')
         setError('Не удалось проверить приглашение. Попробуйте позже.')
       }
-      return
     }
 
-    if (!diaryId) {
-      setStatus('invalid')
-      setError('Ссылка недействительна. Не указан дневник для доступа.')
-      return
-    }
+    validateInvite()
+  }, [token]) // flowType теперь state, не нужно в зависимостях
 
-    const diariesRaw = localStorage.getItem('diaries')
-    const diaries: DiaryRecord[] = diariesRaw ? JSON.parse(diariesRaw) : []
-    const diary = diaries.find(record => String(record.id) === String(diaryId)) || null
-    if (!diary) {
-      setStatus('invalid')
-      setError('Дневник не найден или доступ к нему был отозван.')
-      return
-    }
-
-    const validation = validateInvite(diaryId, token, diary)
-    if (!validation) {
-      setStatus('invalid')
-      setError('Приглашение недействительно или уже было использовано.')
-      return
-    }
-
-    setLinkInfo(validation.link)
-    setDiaryInfo(validation.diary)
-
-    if (validation.link.accepted_by) {
-      setStatus('invalid')
-      setError('Эта ссылка уже была использована другим пользователем.')
-      return
-    }
-
-    setStatus('form')
-  }, [flowType, diaryId, token])
-
-  const handleOrganizationSubmit = (formData: ClientRegisterFormData) => {
-    if (!diaryId || !token || !linkInfo || !diaryInfo) return
+  const handleOrganizationSubmit = async (formData: ClientRegisterFormData) => {
+    if (!token || !inviteData) return
     setStatus('processing')
     setError(null)
 
@@ -215,101 +187,101 @@ export const ClientInviteRegisterPage = () => {
     }
 
     try {
-      const usersRaw = localStorage.getItem('local_users')
-      const users = usersRaw ? JSON.parse(usersRaw) : []
-      if (users.some((user: any) => user.phone === phone)) {
-        setError('Пользователь с таким номером телефона уже зарегистрирован')
-        setStatus('form')
-        return
-      }
-
-      const clientId = createClientId()
-      const now = new Date().toISOString()
-
-      const newUser = {
-        id: clientId,
-        phone,
-        password: formData.password,
-        user_role: 'client',
-        organization_id: diaryInfo.organization_id,
-        caregiver_id: null,
-        created_at: now,
-      }
-
-      const nextUsers = [...users, newUser]
-      localStorage.setItem('local_users', JSON.stringify(nextUsers))
-
-      const clientsRaw = localStorage.getItem('local_clients')
-      const clients = clientsRaw ? JSON.parse(clientsRaw) : []
-      const clientProfile = {
-        user_id: clientId,
-        first_name: formData.firstName,
-        last_name: formData.lastName,
-        phone,
-        diary_id: diaryInfo.id,
-        patient_card_id: diaryInfo.patient_card_id,
-        organization_id: diaryInfo.organization_id,
-        caregiver_id: diaryInfo.caregiver_id ?? null,
-        created_at: now,
-        updated_at: now,
-      }
-      const nextClients = [...clients, clientProfile]
-      localStorage.setItem('local_clients', JSON.stringify(nextClients))
-
-      const { diary: updatedDiary } = attachClientToDiary({
-        diaryId,
-        clientId,
-      })
-
-      const storedLinksRaw = localStorage.getItem('diary_client_links')
-      const storedLinks = storedLinksRaw ? JSON.parse(storedLinksRaw) : {}
-      const normalizedLink = normalizeClientLink(storedLinks?.[diaryId], {
-        diaryId,
-        patientCardId: updatedDiary?.patient_card_id ?? diaryInfo.patient_card_id ?? null,
-        organizationId: updatedDiary?.organization_id ?? diaryInfo.organization_id ?? null,
-      })
-
-      if (normalizedLink) {
-        normalizedLink.accepted_by = clientId
-        normalizedLink.accepted_at = now
-        normalizedLink.patient_card_id =
-          normalizedLink.patient_card_id ?? updatedDiary?.patient_card_id ?? diaryInfo.patient_card_id ?? null
-        normalizedLink.organization_id =
-          normalizedLink.organization_id ?? updatedDiary?.organization_id ?? diaryInfo.organization_id ?? null
-        storedLinks[diaryId] = normalizedLink
-        localStorage.setItem('diary_client_links', JSON.stringify(storedLinks))
-      }
-
-      const currentUser = {
-        id: clientId,
-        user_role: 'client',
-        phone,
-        organization_id: updatedDiary?.organization_id ?? diaryInfo.organization_id ?? null,
-        caregiver_id: updatedDiary?.caregiver_id ?? diaryInfo.caregiver_id ?? null,
-        diary_id: diaryId,
-        patient_card_id: updatedDiary?.patient_card_id ?? diaryInfo.patient_card_id ?? null,
-        profile_data: {
+      // Регистрация ТОЛЬКО через Edge Function accept-invite (как для сотрудников)
+      // Edge Function создаст пользователя через admin API, обходя валидацию email
+      
+      // Используем прямой fetch для лучшей совместимости с CORS
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+      
+      const baseUrl = supabaseUrl.replace(/\/$/, '')
+      const functionUrl = `${baseUrl}/functions/v1/accept-invite`
+      
+      console.log('ClientInviteRegisterPage: Calling Edge Function:', functionUrl)
+      
+      const response = await fetch(functionUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseAnonKey}`,
+          'apikey': supabaseAnonKey,
+        },
+        body: JSON.stringify({
+          token: token,
+          password: formData.password,
+          phone: phone,
           firstName: formData.firstName,
           lastName: formData.lastName,
-          phone,
-        },
+        }),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('Edge Function error:', response.status, errorText)
+        let errorMessage = 'Не удалось завершить регистрацию. Попробуйте ещё раз.'
+        try {
+          const errorJson = JSON.parse(errorText)
+          errorMessage = errorJson.message || errorJson.error || errorMessage
+        } catch {
+          errorMessage = errorText || errorMessage
+        }
+        throw new Error(errorMessage)
       }
 
-      localStorage.setItem('current_user', JSON.stringify(currentUser))
-      localStorage.setItem('auth_token', `client_token_${clientId}`)
-      setUser(currentUser as any)
+      const inviteResult = await response.json()
+      
+      if (!inviteResult?.data?.session) {
+        throw new Error('Не удалось получить сессию после регистрации. Попробуйте войти вручную.')
+      }
 
-      setStatus('processing')
-      navigate('/profile')
-    } catch (err) {
-      console.error('Ошибка регистрации клиента', err)
-      setError('Не удалось завершить регистрацию. Попробуйте ещё раз.')
+      // Устанавливаем сессию в Supabase клиенте
+      const { error: sessionError } = await supabase.auth.setSession({
+        access_token: inviteResult.data.session.access_token,
+        refresh_token: inviteResult.data.session.refresh_token,
+      })
+      
+      if (sessionError) {
+        console.error('Ошибка установки сессии:', sessionError)
+        throw new Error('Не удалось установить сессию. Попробуйте войти вручную.')
+      }
+
+      // Получаем текущего пользователя и сессию
+      const { data: { user: currentUser }, error: userError } = await supabase.auth.getUser()
+      const { data: { session: currentSession } } = await supabase.auth.getSession()
+
+      if (userError || !currentUser) {
+        console.error('Ошибка получения пользователя:', userError)
+        throw new Error('Не удалось получить данные пользователя. Попробуйте войти вручную.')
+      }
+
+      // Обновляем authStore напрямую
+      const { setUser, setSession, setLoading } = useAuthStore.getState()
+      if (currentSession && currentUser) {
+        setUser(currentUser)
+        setSession(currentSession)
+        setLoading(false)
+        
+        useAuthStore.setState({ 
+          isAuthenticated: true,
+          loading: false,
+        })
+      }
+
+      console.log('✅ Регистрация клиента организации завершена успешно')
+      
+      // Небольшая задержка перед навигацией
+      await new Promise(resolve => setTimeout(resolve, 200))
+      
+      navigate('/profile/setup')
+    } catch (err: any) {
+      console.error('Ошибка регистрации клиента организации', err)
+      setError(err.message || 'Не удалось завершить регистрацию. Попробуйте ещё раз.')
       setStatus('form')
     }
   }
 
-  const handleCaregiverSubmit = (formData: ClientRegisterFormData) => {
-    if (!caregiverInvite) return
+  const handleCaregiverSubmit = async (formData: ClientRegisterFormData) => {
+    if (!token || !inviteData) return
     setStatus('processing')
     setError(null)
 
@@ -321,87 +293,95 @@ export const ClientInviteRegisterPage = () => {
     }
 
     try {
-      const usersRaw = localStorage.getItem('local_users')
-      const users = usersRaw ? JSON.parse(usersRaw) : []
-      if (users.some((user: any) => user.phone === phone)) {
-        setError('Пользователь с таким номером телефона уже зарегистрирован')
-        setStatus('form')
-        return
-      }
-
-      const clientId = createClientId()
-      const now = new Date().toISOString()
-
-      const newUser = {
-        id: clientId,
-        phone,
-        password: formData.password,
-        user_role: 'client',
-        organization_id: null,
-        caregiver_id: caregiverInvite.caregiver_id ?? null,
-        created_at: now,
-      }
-
-      const nextUsers = [...users, newUser]
-      localStorage.setItem('local_users', JSON.stringify(nextUsers))
-
-      const clientsRaw = localStorage.getItem('local_clients')
-      const clients = clientsRaw ? JSON.parse(clientsRaw) : []
-      const clientProfile = {
-        user_id: clientId,
-        first_name: formData.firstName,
-        last_name: formData.lastName,
-        phone,
-        diary_id: null,
-        patient_card_id: null,
-        organization_id: null,
-        caregiver_id: caregiverInvite.caregiver_id ?? null,
-        created_at: now,
-        updated_at: now,
-      }
-      const nextClients = [...clients, clientProfile]
-      localStorage.setItem('local_clients', JSON.stringify(nextClients))
-
-      try {
-        const tokensRaw = localStorage.getItem('caregiver_client_invite_tokens')
-        const tokens = tokensRaw ? JSON.parse(tokensRaw) : []
-        const tokenIndex = tokens.findIndex((item: any) => String(item.token) === String(token))
-        if (tokenIndex !== -1) {
-          tokens[tokenIndex] = {
-            ...tokens[tokenIndex],
-            used_at: now,
-            used_by: clientId,
-          }
-          localStorage.setItem('caregiver_client_invite_tokens', JSON.stringify(tokens))
-        }
-      } catch (inviteUpdateError) {
-        console.warn('Не удалось обновить статус пригласительной ссылки', inviteUpdateError)
-      }
-
-      const currentUser = {
-        id: clientId,
-        user_role: 'client',
-        phone,
-        organization_id: null,
-        caregiver_id: caregiverInvite.caregiver_id ?? null,
-        diary_id: null,
-        patient_card_id: null,
-        profile_data: {
+      // Регистрация ТОЛЬКО через Edge Function accept-invite (как для сотрудников)
+      // Edge Function создаст пользователя через admin API, обходя валидацию email
+      
+      // Используем прямой fetch для лучшей совместимости с CORS
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+      
+      const baseUrl = supabaseUrl.replace(/\/$/, '')
+      const functionUrl = `${baseUrl}/functions/v1/accept-invite`
+      
+      console.log('ClientInviteRegisterPage: Calling Edge Function for caregiver:', functionUrl)
+      
+      const response = await fetch(functionUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseAnonKey}`,
+          'apikey': supabaseAnonKey,
+        },
+        body: JSON.stringify({
+          token: token,
+          password: formData.password,
+          phone: phone,
           firstName: formData.firstName,
           lastName: formData.lastName,
-          phone,
-        },
+        }),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('Edge Function error:', response.status, errorText)
+        let errorMessage = 'Не удалось завершить регистрацию. Попробуйте ещё раз.'
+        try {
+          const errorJson = JSON.parse(errorText)
+          errorMessage = errorJson.message || errorJson.error || errorMessage
+        } catch {
+          errorMessage = errorText || errorMessage
+        }
+        throw new Error(errorMessage)
       }
 
-      localStorage.setItem('current_user', JSON.stringify(currentUser))
-      localStorage.setItem('auth_token', `client_token_${clientId}`)
-      setUser(currentUser as any)
+      const inviteResult = await response.json()
+      
+      if (!inviteResult?.data?.session) {
+        throw new Error('Не удалось получить сессию после регистрации. Попробуйте войти вручную.')
+      }
 
-      setStatus('processing')
-      navigate('/profile')
-    } catch (err) {
-      console.error('Ошибка регистрации клиента по ссылке сиделки', err)
-      setError('Не удалось завершить регистрацию. Попробуйте ещё раз.')
+      // Устанавливаем сессию в Supabase клиенте
+      const { error: sessionError } = await supabase.auth.setSession({
+        access_token: inviteResult.data.session.access_token,
+        refresh_token: inviteResult.data.session.refresh_token,
+      })
+      
+      if (sessionError) {
+        console.error('Ошибка установки сессии:', sessionError)
+        throw new Error('Не удалось установить сессию. Попробуйте войти вручную.')
+      }
+
+      // Получаем текущего пользователя и сессию
+      const { data: { user: currentUser }, error: userError } = await supabase.auth.getUser()
+      const { data: { session: currentSession } } = await supabase.auth.getSession()
+
+      if (userError || !currentUser) {
+        console.error('Ошибка получения пользователя:', userError)
+        throw new Error('Не удалось получить данные пользователя. Попробуйте войти вручную.')
+      }
+
+      // Обновляем authStore напрямую
+      const { setUser, setSession, setLoading } = useAuthStore.getState()
+      if (currentSession && currentUser) {
+        setUser(currentUser)
+        setSession(currentSession)
+        setLoading(false)
+        
+        useAuthStore.setState({ 
+          isAuthenticated: true,
+          loading: false,
+        })
+      }
+
+      console.log('✅ Регистрация клиента сиделки завершена успешно')
+      
+      // Небольшая задержка перед навигацией
+      await new Promise(resolve => setTimeout(resolve, 200))
+      
+      navigate('/profile/setup')
+    } catch (err: any) {
+      console.error('Ошибка регистрации клиента сиделки', err)
+      setError(err.message || 'Не удалось завершить регистрацию. Попробуйте ещё раз.')
       setStatus('form')
     }
   }
@@ -429,10 +409,17 @@ export const ClientInviteRegisterPage = () => {
     )
   }
 
+  // Показываем форму только если flowType определен
+  if (!flowType || !inviteData) {
+    return (
+      <div className="space-y-4 text-center">
+        <div className="animate-spin w-12 h-12 border-4 border-[#7DD3DC] border-t-transparent rounded-full mx-auto"></div>
+        <p className="text-gray-600 text-sm">Загрузка...</p>
+      </div>
+    )
+  }
+
   if (flowType === 'caregiver') {
-    if (!caregiverInvite) {
-      return null
-    }
 
     return (
       <div className="space-y-6">
@@ -441,9 +428,9 @@ export const ClientInviteRegisterPage = () => {
           <p className="text-sm text-gray-600 leading-relaxed">
             После регистрации вы сможете создать карточку подопечного и вести дневник вместе с приглашавшим специалистом.
           </p>
-          {caregiverUser && (
+          {inviteData?.caregiver_client_invite_tokens?.invited_client_name && (
             <p className="text-sm text-[#4A4A4A]/70">
-              Пригласил: {`${caregiverUser.first_name || ''} ${caregiverUser.last_name || ''}`.trim() || 'Ваш специалист'}
+              Пригласил: {inviteData.caregiver_client_invite_tokens.invited_client_name}
             </p>
           )}
         </div>
@@ -515,7 +502,7 @@ export const ClientInviteRegisterPage = () => {
     )
   }
 
-  if (!linkInfo || !diaryInfo) {
+  if (!inviteData || !diaryInfo) {
     return null
   }
 
