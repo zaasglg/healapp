@@ -345,24 +345,41 @@ async function handleOrganizationClient(
     user_id: user.id,
   });
   
-  const { error: updateInviteTokenError } = await client
+  // Сначала проверяем, существует ли запись
+  const { data: existingToken, error: checkError } = await client
     .from("organization_client_invite_tokens")
-    .update({
-      invited_client_phone: normalizedPhone,
-      invited_client_name: invitedName,
-      metadata: {
-        registered_at: new Date().toISOString(),
-        user_id: user.id,
-        client_id: clientId,
-      },
-    })
-    .eq("invite_id", invite.id);
+    .select("invite_id")
+    .eq("invite_id", invite.id)
+    .single();
+  
+  if (checkError && checkError.code !== 'PGRST116') {
+    console.error("Error checking organization_client_invite_tokens:", checkError);
+  }
+  
+  if (existingToken) {
+    // Запись существует, обновляем
+    const { data: updatedData, error: updateInviteTokenError } = await client
+      .from("organization_client_invite_tokens")
+      .update({
+        invited_client_phone: normalizedPhone,
+        invited_client_name: invitedName,
+        metadata: {
+          registered_at: new Date().toISOString(),
+          user_id: user.id,
+          client_id: clientId,
+        },
+      })
+      .eq("invite_id", invite.id)
+      .select();
 
-  if (updateInviteTokenError) {
-    console.error("Error updating organization_client_invite_tokens:", updateInviteTokenError);
-    // Не прерываем выполнение, так как это не критично
+    if (updateInviteTokenError) {
+      console.error("Error updating organization_client_invite_tokens:", updateInviteTokenError);
+      // Не прерываем выполнение, так как это не критично
+    } else {
+      console.log("✅ Successfully updated organization_client_invite_tokens:", updatedData);
+    }
   } else {
-    console.log("✅ Successfully updated organization_client_invite_tokens");
+    console.warn("⚠️ organization_client_invite_tokens record not found for invite_id:", invite.id);
   }
 
   await markInviteUsed(client, invite.id, user.id);
@@ -457,24 +474,41 @@ async function handleCaregiverClient(
     user_id: user.id,
   });
   
-  const { error: updateInviteTokenError } = await client
+  // Сначала проверяем, существует ли запись
+  const { data: existingToken, error: checkError } = await client
     .from("caregiver_client_invite_tokens")
-    .update({
-      invited_client_phone: normalizedPhone,
-      invited_client_name: invitedName,
-      metadata: {
-        registered_at: new Date().toISOString(),
-        user_id: user.id,
-        client_id: clientId,
-      },
-    })
-    .eq("invite_id", invite.id);
+    .select("invite_id")
+    .eq("invite_id", invite.id)
+    .single();
+  
+  if (checkError && checkError.code !== 'PGRST116') {
+    console.error("Error checking caregiver_client_invite_tokens:", checkError);
+  }
+  
+  if (existingToken) {
+    // Запись существует, обновляем
+    const { data: updatedData, error: updateInviteTokenError } = await client
+      .from("caregiver_client_invite_tokens")
+      .update({
+        invited_client_phone: normalizedPhone,
+        invited_client_name: invitedName,
+        metadata: {
+          registered_at: new Date().toISOString(),
+          user_id: user.id,
+          client_id: clientId,
+        },
+      })
+      .eq("invite_id", invite.id)
+      .select();
 
-  if (updateInviteTokenError) {
-    console.error("Error updating caregiver_client_invite_tokens:", updateInviteTokenError);
-    // Не прерываем выполнение, так как это не критично
+    if (updateInviteTokenError) {
+      console.error("Error updating caregiver_client_invite_tokens:", updateInviteTokenError);
+      // Не прерываем выполнение, так как это не критично
+    } else {
+      console.log("✅ Successfully updated caregiver_client_invite_tokens:", updatedData);
+    }
   } else {
-    console.log("✅ Successfully updated caregiver_client_invite_tokens");
+    console.warn("⚠️ caregiver_client_invite_tokens record not found for invite_id:", invite.id);
   }
 
   await markInviteUsed(client, invite.id, user.id);
