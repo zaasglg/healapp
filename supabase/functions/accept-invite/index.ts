@@ -273,6 +273,14 @@ async function handleOrganizationClient(
     },
   });
 
+  console.log("Creating client for organization:", {
+    user_id: user.id,
+    organization_id: meta.organization_id,
+    phone: normalizedPhone,
+    first_name: payload.firstName || "",
+    last_name: payload.lastName || "",
+  });
+  
   const clientInsert = await client
     .from("clients")
     .insert({
@@ -284,7 +292,12 @@ async function handleOrganizationClient(
     })
     .select("id")
     .single();
-  if (clientInsert.error) throw clientInsert.error;
+  if (clientInsert.error) {
+    console.error("Error creating client:", clientInsert.error);
+    throw clientInsert.error;
+  }
+  
+  console.log("✅ Client created successfully:", clientInsert.data.id);
 
   const clientId = clientInsert.data.id;
 
@@ -323,6 +336,15 @@ async function handleOrganizationClient(
   const invitedName = (payload.firstName && payload.lastName) 
     ? `${payload.firstName} ${payload.lastName}`.trim() 
     : null;
+  
+  console.log("Updating organization_client_invite_tokens:", {
+    invite_id: invite.id,
+    invited_client_phone: normalizedPhone,
+    invited_client_name: invitedName,
+    client_id: clientId,
+    user_id: user.id,
+  });
+  
   const { error: updateInviteTokenError } = await client
     .from("organization_client_invite_tokens")
     .update({
@@ -339,6 +361,8 @@ async function handleOrganizationClient(
   if (updateInviteTokenError) {
     console.error("Error updating organization_client_invite_tokens:", updateInviteTokenError);
     // Не прерываем выполнение, так как это не критично
+  } else {
+    console.log("✅ Successfully updated organization_client_invite_tokens");
   }
 
   await markInviteUsed(client, invite.id, user.id);
@@ -383,6 +407,14 @@ async function handleCaregiverClient(
     },
   });
 
+  console.log("Creating client for caregiver:", {
+    user_id: user.id,
+    caregiver_id: meta.caregiver_id,
+    phone: normalizedPhone,
+    first_name: payload.firstName || "",
+    last_name: payload.lastName || "",
+  });
+  
   const clientInsert = await client
     .from("clients")
     .insert({
@@ -394,7 +426,12 @@ async function handleCaregiverClient(
     })
     .select("id")
     .single();
-  if (clientInsert.error) throw clientInsert.error;
+  if (clientInsert.error) {
+    console.error("Error creating client:", clientInsert.error);
+    throw clientInsert.error;
+  }
+  
+  console.log("✅ Client created successfully:", clientInsert.data.id);
 
   const clientId = clientInsert.data.id;
 
@@ -411,6 +448,15 @@ async function handleCaregiverClient(
   const invitedName = (payload.firstName && payload.lastName) 
     ? `${payload.firstName} ${payload.lastName}`.trim() 
     : null;
+  
+  console.log("Updating caregiver_client_invite_tokens:", {
+    invite_id: invite.id,
+    invited_client_phone: normalizedPhone,
+    invited_client_name: invitedName,
+    client_id: clientId,
+    user_id: user.id,
+  });
+  
   const { error: updateInviteTokenError } = await client
     .from("caregiver_client_invite_tokens")
     .update({
@@ -427,6 +473,8 @@ async function handleCaregiverClient(
   if (updateInviteTokenError) {
     console.error("Error updating caregiver_client_invite_tokens:", updateInviteTokenError);
     // Не прерываем выполнение, так как это не критично
+  } else {
+    console.log("✅ Successfully updated caregiver_client_invite_tokens");
   }
 
   await markInviteUsed(client, invite.id, user.id);
