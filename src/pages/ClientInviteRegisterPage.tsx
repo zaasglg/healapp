@@ -77,73 +77,75 @@ export const ClientInviteRegisterPage = () => {
 
     const validateInvite = async () => {
       try {
-        // Сначала проверяем токен без фильтрации по типу, чтобы определить тип приглашения
-        const { data, error: inviteError } = await supabase
-          .from('invite_tokens')
-          .select(`
-            id,
-            token,
-            invite_type,
-            expires_at,
-            used_at,
-            revoked_at,
-            organization_client_invite_tokens (
-              organization_id,
-              patient_card_id,
-              diary_id,
-              invited_client_phone,
-              invited_client_name
-            ),
-            caregiver_client_invite_tokens (
-              caregiver_id,
-              invited_client_phone,
-              invited_client_name
-            )
-          `)
-          .eq('token', token)
-          .in('invite_type', ['organization_client', 'caregiver_client'])
-          .is('revoked_at', null)
-          .single()
+        // Используем RPC функцию для валидации токена (обходит RLS)
+        console.log('ClientInviteRegisterPage: Validating token via RPC:', token)
+        const { data: validationResult, error: rpcError } = await supabase.rpc('validate_invite_token', {
+          p_token: token,
+        })
 
-        if (inviteError || !data) {
-          console.error('ClientInviteRegisterPage: Token validation error:', inviteError)
+        console.log('ClientInviteRegisterPage: RPC result:', { validationResult, rpcError })
+
+        if (rpcError) {
+          console.error('ClientInviteRegisterPage: RPC validation error:', rpcError)
           setStatus('invalid')
           setError('Пригласительная ссылка недействительна или была удалена.')
           return
         }
 
+        if (!validationResult) {
+          console.error('ClientInviteRegisterPage: RPC returned null/undefined')
+          setStatus('invalid')
+          setError('Пригласительная ссылка недействительна или была удалена.')
+          return
+        }
+
+        // Проверяем результат валидации
+        if (!validationResult.valid) {
+          console.log('ClientInviteRegisterPage: Token validation failed:', validationResult.error)
+          setStatus('invalid')
+          setError(validationResult.error || 'Пригласительная ссылка недействительна или была удалена.')
+          return
+        }
+
         // Определяем тип приглашения по данным токена
-        const detectedInviteType = data.invite_type as 'organization_client' | 'caregiver_client'
+        const detectedInviteType = validationResult.invite_type as 'organization_client' | 'caregiver_client'
         
-        if (detectedInviteType === 'organization_client') {
-          setFlowType('organization')
-        } else if (detectedInviteType === 'caregiver_client') {
-          setFlowType('caregiver')
-        } else {
+        if (detectedInviteType !== 'organization_client' && detectedInviteType !== 'caregiver_client') {
           setStatus('invalid')
           setError('Неверный тип пригласительной ссылки.')
           return
         }
 
-        if (data.used_at) {
-          setStatus('invalid')
-          setError('Эта пригласительная ссылка уже была использована.')
-          return
+        if (detectedInviteType === 'organization_client') {
+          setFlowType('organization')
+        } else if (detectedInviteType === 'caregiver_client') {
+          setFlowType('caregiver')
         }
 
-        if (data.expires_at && new Date(data.expires_at) < new Date()) {
-          setStatus('invalid')
-          setError('Срок действия пригласительной ссылки истек.')
-          return
+        // Преобразуем результат RPC в формат, ожидаемый компонентом
+        // RPC возвращает jsonb, поэтому нужно правильно обработать массивы
+        const orgClientTokens = validationResult.organization_client_invite_tokens
+        const caregiverTokens = validationResult.caregiver_client_invite_tokens
+        
+        const inviteData = {
+          id: validationResult.id,
+          token: validationResult.token,
+          invite_type: validationResult.invite_type,
+          expires_at: validationResult.expires_at,
+          used_at: validationResult.used_at,
+          revoked_at: validationResult.revoked_at,
+          organization_client_invite_tokens: Array.isArray(orgClientTokens) && orgClientTokens.length > 0
+            ? orgClientTokens[0]
+            : orgClientTokens || null,
+          caregiver_client_invite_tokens: Array.isArray(caregiverTokens) && caregiverTokens.length > 0
+            ? caregiverTokens[0]
+            : caregiverTokens || null,
         }
 
-        setInviteData(data)
+        setInviteData(inviteData)
 
         // Если это приглашение от организации, загружаем информацию о дневнике
-        // organization_client_invite_tokens может быть массивом или объектом
-        const orgClientInviteData = Array.isArray(data.organization_client_invite_tokens)
-          ? data.organization_client_invite_tokens[0]
-          : data.organization_client_invite_tokens
+        const orgClientInviteData = inviteData.organization_client_invite_tokens
         
         if (detectedInviteType === 'organization_client' && orgClientInviteData?.diary_id) {
           const { data: diary, error: diaryError } = await supabase
