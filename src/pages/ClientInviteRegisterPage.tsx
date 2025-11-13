@@ -12,8 +12,6 @@ import { supabase } from '@/lib/supabase'
 
 const clientRegisterSchema = z
   .object({
-    firstName: z.string().min(1, 'Введите имя'),
-    lastName: z.string().min(1, 'Введите фамилию'),
     phone: z.string().min(10, 'Введите телефон'),
     password: z.string().min(6, 'Пароль должен быть не менее 6 символов'),
     confirmPassword: z.string().min(1, 'Подтвердите пароль'),
@@ -212,8 +210,8 @@ export const ClientInviteRegisterPage = () => {
           token: token,
           password: formData.password,
           phone: phone,
-          firstName: formData.firstName,
-          lastName: formData.lastName,
+          firstName: '', // Заполняется в ProfileSetupPage
+          lastName: '', // Заполняется в ProfileSetupPage
         }),
       })
 
@@ -318,8 +316,8 @@ export const ClientInviteRegisterPage = () => {
           token: token,
           password: formData.password,
           phone: phone,
-          firstName: formData.firstName,
-          lastName: formData.lastName,
+          firstName: '', // Заполняется в ProfileSetupPage
+          lastName: '', // Заполняется в ProfileSetupPage
         }),
       })
 
@@ -439,20 +437,6 @@ export const ClientInviteRegisterPage = () => {
 
         <form onSubmit={handleSubmit(handleCaregiverSubmit)} className="bg-white rounded-3xl shadow-sm p-6 space-y-5">
           <Input
-            label="Имя"
-            placeholder="Введите имя"
-            error={errors.firstName?.message}
-            fullWidth
-            {...register('firstName')}
-          />
-          <Input
-            label="Фамилия"
-            placeholder="Введите фамилию"
-            error={errors.lastName?.message}
-            fullWidth
-            {...register('lastName')}
-          />
-          <Input
             label="Телефон"
             placeholder="+7 (___) ___-__-__"
             error={errors.phone?.message}
@@ -520,20 +504,6 @@ export const ClientInviteRegisterPage = () => {
       </div>
 
       <form onSubmit={handleSubmit(handleOrganizationSubmit)} className="bg-white rounded-3xl shadow-sm p-6 space-y-5">
-        <Input
-          label="Имя"
-          placeholder="Введите имя"
-          error={errors.firstName?.message}
-          fullWidth
-          {...register('firstName')}
-        />
-        <Input
-          label="Фамилия"
-          placeholder="Введите фамилию"
-          error={errors.lastName?.message}
-          fullWidth
-          {...register('lastName')}
-        />
         <Input
           label="Телефон"
           placeholder="+7 (___) ___-__-__"

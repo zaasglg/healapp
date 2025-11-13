@@ -151,13 +151,45 @@ export const ProfileSetupPage = () => {
         email: user.email,
         phone: (user as any).phone,
         user_role: (user as any).user_role,
+        user_metadata_role: user.user_metadata?.role,
+        user_metadata_user_role: user.user_metadata?.user_role,
         organization_type: user.user_metadata?.organization_type
       })
 
-      // Проверяем user_role напрямую в user объекте
-      const userRole = (user as any).user_role || user.user_metadata?.user_role as string | undefined
+      // Проверяем user_role - может быть в разных местах
+      // В Edge Function сохраняется как 'role', но также может быть 'user_role'
+      let userRole = (user as any).user_role || 
+                     user.user_metadata?.user_role || 
+                     user.user_metadata?.role as string | undefined
       
-      console.log('ProfileSetupPage: Checking userRole:', userRole)
+      // Если роль не найдена в user_metadata, загружаем из user_profiles
+      if (!userRole) {
+        try {
+          console.log('ProfileSetupPage: Role not found in metadata, loading from user_profiles...')
+          const { data: userProfile, error: profileError } = await supabase
+            .from('user_profiles')
+            .select('role, organization_id')
+            .eq('user_id', user.id)
+            .single()
+          
+          if (!profileError && userProfile) {
+            userRole = userProfile.role
+            console.log('ProfileSetupPage: Loaded role from user_profiles:', userRole, 'organization_id:', userProfile.organization_id)
+            
+            // Если это сотрудник, загружаем organization_id
+            if (userRole === 'org_employee' && userProfile.organization_id) {
+              console.log('ProfileSetupPage: Setting organization_id from user_profiles:', userProfile.organization_id)
+              setOrganizationId(userProfile.organization_id)
+            }
+          } else if (profileError) {
+            console.error('ProfileSetupPage: Error loading user_profiles:', profileError)
+          }
+        } catch (err) {
+          console.error('ProfileSetupPage: Error loading from user_profiles:', err)
+        }
+      }
+      
+      console.log('ProfileSetupPage: Final userRole:', userRole)
       
       // КЛИЕНТ: определяется ПЕРВЫМ, до проверки organization_type
       if (userRole === 'client') {
@@ -198,18 +230,54 @@ export const ProfileSetupPage = () => {
 
       // СОТРУДНИК: определяется последним
       if (userRole === 'org_employee') {
-        const orgId = (user as any).organization_id || 
-                     user.user_metadata?.organization_id || 
-                     localStorageUser?.organization_id
+        let orgId = (user as any).organization_id || 
+                    user.user_metadata?.organization_id || 
+                    localStorageUser?.organization_id
+        
+        // Если organization_id не найден, загружаем из user_profiles или organization_employees
+        if (!orgId || orgId === 'temp') {
+          try {
+            console.log('ProfileSetupPage: organization_id not found, loading from DB...')
+            
+            // Сначала пробуем user_profiles
+            const { data: userProfile } = await supabase
+              .from('user_profiles')
+              .select('organization_id')
+              .eq('user_id', user.id)
+              .single()
+            
+            if (userProfile?.organization_id) {
+              orgId = userProfile.organization_id
+              console.log('ProfileSetupPage: Loaded organization_id from user_profiles:', orgId)
+            } else {
+              // Если нет в user_profiles, пробуем organization_employees
+              const { data: employeeData } = await supabase
+                .from('organization_employees')
+                .select('organization_id')
+                .eq('user_id', user.id)
+                .single()
+              
+              if (employeeData?.organization_id) {
+                orgId = employeeData.organization_id
+                console.log('ProfileSetupPage: Loaded organization_id from organization_employees:', orgId)
+              }
+            }
+          } catch (err) {
+            console.error('ProfileSetupPage: Error loading organization_id:', err)
+          }
+        }
         
         console.log('ProfileSetupPage: Checking employee, orgId:', orgId)
         
         if (orgId && orgId !== 'temp') {
-          console.log('✅ ProfileSetupPage: Detected EMPLOYEE')
+          console.log('✅ ProfileSetupPage: Detected EMPLOYEE with orgId:', orgId)
           setIsEmployee(true)
           setOrganizationId(orgId)
           setIsChecking(false)
+          hasCheckedRef.current = true
           return
+        } else {
+          console.warn('ProfileSetupPage: Employee detected but no organization_id found')
         }
       }
 
@@ -260,26 +328,59 @@ export const ProfileSetupPage = () => {
     setError(null)
 
     try {
-      // Пытаемся сохранить в БД (если таблица существует)
+      // Сохраняем в БД через RPC функцию (создает запись в user_profiles и organizations)
       try {
-        const { error: insertError } = await supabase
+        // Сначала убеждаемся, что user_profiles создан
+        // Для сиделки используется роль 'organization', так как она является организацией (частной)
+        const { error: profileError } = await supabase.rpc('create_user_profile', {
+          p_role: 'organization',
+        })
+        
+        if (profileError && profileError.code !== '23505') { // Игнорируем ошибку дубликата
+          console.warn('Не удалось создать/обновить user_profiles через RPC:', profileError)
+        }
+        
+        // Создаем запись в organizations через RPC
+        const { data: createdOrg, error: rpcError } = await supabase.rpc('create_organization', {
+          p_organization_type: organizationType,
+          p_name: `${data.firstName} ${data.lastName}`,
+          p_phone: data.phone,
+          p_address: null, // Для сиделки адрес не обязателен
+        })
+
+        if (rpcError) {
+          throw rpcError
+        }
+        
+        // Обновляем запись в organizations с дополнительными полями
+        if (createdOrg?.id) {
+          const { error: updateError } = await supabase
           .from('organizations')
-          .insert({
-            user_id: user.id,
-            type: organizationType,
+            .update({
             first_name: data.firstName,
             last_name: data.lastName,
-            name: `${data.firstName} ${data.lastName}`, // ФИО для отображения
+              city: data.city,
+            })
+            .eq('id', createdOrg.id)
+          
+          if (updateError) {
+            console.warn('Не удалось обновить дополнительные поля организации:', updateError)
+          }
+        }
+
+        // Обновляем метаданные пользователя
+        await supabase.auth.updateUser({
+          data: {
+            organization_type: organizationType,
+            firstName: data.firstName,
+            lastName: data.lastName,
             phone: data.phone,
             city: data.city,
-            address: null, // Для сиделки адрес не обязателен
+          },
           })
-
-        if (insertError) {
-          throw insertError
-        }
       } catch (dbError: any) {
-        // Если таблицы нет, сохраняем в metadata (для фронтенда)
+        console.error('Ошибка создания организации:', dbError)
+        // Если RPC не работает, сохраняем в metadata (fallback)
         const { error: updateError } = await supabase.auth.updateUser({
           data: {
             profile_data: {
@@ -288,6 +389,7 @@ export const ProfileSetupPage = () => {
               phone: data.phone,
               city: data.city,
             },
+            organization_type: organizationType,
           },
         })
 
@@ -315,47 +417,66 @@ export const ProfileSetupPage = () => {
       // Получаем телефон из user.phone (из регистрации) или из metadata
       const phone = (user as any).phone || user.user_metadata?.phone_for_login || user.user_metadata?.phone || null
 
-      // Сохраняем в localStorage (для фронтенда)
-      const clients = JSON.parse(localStorage.getItem('local_clients') || '[]')
-      const existingIndex = clients.findIndex((c: any) => c.user_id === user.id)
-      
-      const clientProfileData = {
-        user_id: user.id,
-        caregiver_id: clientData.caregiver_id || null,
-        organization_id: clientData.organization_id || null,
-        first_name: data.firstName,
-        last_name: data.lastName,
-        phone: phone,
-        patient_card_id: clientData.patient_card_id || null,
-        diary_id: clientData.diary_id || null,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+      // Сохраняем в Supabase (таблица clients)
+      // Проверяем, существует ли уже запись для этого клиента
+      const { data: existingClient, error: checkError } = await supabase
+        .from('clients')
+        .select('id')
+        .eq('user_id', user.id)
+        .single()
+
+      if (checkError && checkError.code !== 'PGRST116') {
+        // Ошибка, не связанная с отсутствием записи
+        console.error('Ошибка проверки клиента:', checkError)
+        throw checkError
       }
 
-      if (existingIndex !== -1) {
-        clients[existingIndex] = { ...clients[existingIndex], ...clientProfileData }
+      if (existingClient) {
+        // Обновляем существующую запись
+        const { error: updateError } = await supabase
+          .from('clients')
+          .update({
+            first_name: data.firstName,
+            last_name: data.lastName,
+            phone: phone,
+            invited_by_caregiver_id: clientData.caregiver_id || null,
+            invited_by_organization_id: clientData.organization_id || null,
+          })
+          .eq('user_id', user.id)
+
+        if (updateError) {
+          console.error('Ошибка обновления клиента:', updateError)
+          throw updateError
+        }
       } else {
-        clients.push(clientProfileData)
-      }
-      
-      localStorage.setItem('local_clients', JSON.stringify(clients))
+        // Создаем новую запись
+        const { error: insertError } = await supabase
+          .from('clients')
+          .insert({
+            user_id: user.id,
+            first_name: data.firstName,
+            last_name: data.lastName,
+            phone: phone,
+            invited_by_caregiver_id: clientData.caregiver_id || null,
+            invited_by_organization_id: clientData.organization_id || null,
+          })
 
-      // Обновляем текущего пользователя в localStorage
-      const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-      currentUser.profile_data = {
-        firstName: data.firstName,
-        lastName: data.lastName,
-        phone: phone,
-        caregiver_id: clientData.caregiver_id,
-        organization_id: clientData.organization_id,
-        patient_card_id: clientData.patient_card_id,
-        diary_id: clientData.diary_id,
+        if (insertError) {
+          console.error('Ошибка создания клиента:', insertError)
+          throw insertError
+        }
       }
-      localStorage.setItem('current_user', JSON.stringify(currentUser))
 
-      // Обновляем authStore
-      const { setUser } = useAuthStore.getState()
-      setUser({ ...user, ...currentUser } as any)
+      // Обновляем user_metadata для удобства
+      await supabase.auth.updateUser({
+        data: {
+          firstName: data.firstName,
+          lastName: data.lastName,
+          phone: phone,
+        },
+      })
+
+      console.log('✅ Профиль клиента сохранен в Supabase')
 
       // Редирект после заполнения профиля:
       // - Для сиделок: редирект на создание карточки подопечного (клиент создаст карточку и настроит дневник)
@@ -363,7 +484,8 @@ export const ProfileSetupPage = () => {
       // Редирект на личный кабинет клиента
       navigate('/profile')
     } catch (err: any) {
-      setError('Не удалось сохранить профиль. Попробуйте ещё раз.')
+      console.error('Ошибка сохранения профиля клиента:', err)
+      setError(translateError(err) || 'Не удалось сохранить профиль. Попробуйте ещё раз.')
     } finally {
       setIsLoading(false)
     }
@@ -379,16 +501,16 @@ export const ProfileSetupPage = () => {
       // Получаем organization_id - важно! Сначала пробуем из user (из регистрации)
       let orgId = (user as any).organization_id || user.user_metadata?.organization_id || organizationId
       
+      // Получаем токен приглашения (нужен для получения organization_type)
+      const orgInviteToken = (user as any).organization_invite_token || user.user_metadata?.organization_invite_token
+      
       // Если organization_id = 'temp' или отсутствует, пытаемся получить из токена
-      if (!orgId || orgId === 'temp') {
-        const orgInviteToken = (user as any).organization_invite_token || user.user_metadata?.organization_invite_token
-        if (orgInviteToken) {
+      if ((!orgId || orgId === 'temp') && orgInviteToken) {
           const tokens = ensureEmployeeInviteTokens()
           const tokenData = tokens.find(t => t.token === orgInviteToken)
           if (tokenData && tokenData.organization_id) {
             orgId = tokenData.organization_id
             console.log('Found organization_id from token:', orgId)
-          }
         }
       }
 
@@ -402,7 +524,25 @@ export const ProfileSetupPage = () => {
       console.log('Saving employee with organization_id:', orgId, 'user_id:', user.id)
       
       // Получаем роль и тип организации из регистрации
-      const employeeRole = (user as any).employee_role || user.user_metadata?.employee_role || null
+      let employeeRole = (user as any).employee_role || user.user_metadata?.employee_role || null
+      
+      // Если роль не найдена, загружаем из organization_employees
+      if (!employeeRole) {
+        try {
+          const { data: employeeData } = await supabase
+            .from('organization_employees')
+            .select('role')
+            .eq('user_id', user.id)
+            .single()
+          
+          if (employeeData?.role) {
+            employeeRole = employeeData.role
+            console.log('ProfileSetupPage: Loaded role from organization_employees:', employeeRole)
+          }
+        } catch (err) {
+          console.error('ProfileSetupPage: Error loading role from organization_employees:', err)
+        }
+      }
       let organizationTypeValue =
         (user as any).organization_type ||
         user.user_metadata?.organization_type ||
@@ -419,22 +559,85 @@ export const ProfileSetupPage = () => {
       // Получаем телефон из user.phone (из регистрации) или из metadata
       const phone = (user as any).phone || user.user_metadata?.phone_for_login || user.user_metadata?.phone || null
 
-      // Сохраняем в localStorage (для фронтенда)
+      // ВАЖНО: Сначала сохраняем в Supabase (приоритет!)
+      try {
+        console.log('ProfileSetupPage: Saving employee to Supabase:', {
+          user_id: user.id,
+          organization_id: orgId,
+          first_name: data.firstName,
+          last_name: data.lastName,
+          phone: phone,
+          role: employeeRole,
+        })
+        
+        // Проверяем, существует ли запись в organization_employees
+        const { data: existingEmployee, error: checkError } = await supabase
+          .from('organization_employees')
+          .select('id')
+          .eq('user_id', user.id)
+          .single()
+        
+        if (checkError && checkError.code !== 'PGRST116') {
+          // PGRST116 = not found, это нормально для новой записи
+          console.error('ProfileSetupPage: Error checking existing employee:', checkError)
+        }
+        
+        if (existingEmployee) {
+          // Обновляем существующую запись
+          const { error: updateError } = await supabase
+            .from('organization_employees')
+            .update({
+              first_name: data.firstName,
+              last_name: data.lastName,
+              phone: phone || null,
+            })
+            .eq('user_id', user.id)
+          
+          if (updateError) {
+            console.error('ProfileSetupPage: Error updating employee in Supabase:', updateError)
+            throw updateError
+          }
+          
+          console.log('✅ ProfileSetupPage: Employee updated in Supabase')
+        } else {
+          // Создаем новую запись (если не существует)
+          const { error: insertError } = await supabase
+            .from('organization_employees')
+            .insert({
+              user_id: user.id,
+              organization_id: orgId,
+              first_name: data.firstName,
+              last_name: data.lastName,
+              phone: phone || null,
+              role: employeeRole || 'caregiver', // Используем роль из токена или значение по умолчанию
+            })
+          
+          if (insertError) {
+            console.error('ProfileSetupPage: Error inserting employee in Supabase:', insertError)
+            throw insertError
+          }
+          
+          console.log('✅ ProfileSetupPage: Employee created in Supabase')
+        }
+      } catch (dbError: any) {
+        console.error('ProfileSetupPage: Database error:', dbError)
+        // Продолжаем, даже если БД не работает - сохраняем в localStorage как fallback
+        setError('Не удалось сохранить в базу данных. Данные сохранены локально.')
+      }
+
+      // Также сохраняем в localStorage (для совместимости со старым кодом)
       const employees = JSON.parse(localStorage.getItem('local_employees') || '[]')
       const existingIndex = employees.findIndex((e: any) => e.user_id === user.id)
       
-      // Получаем organization_invite_token из регистрации
-      const orgInviteToken = (user as any).organization_invite_token || user.user_metadata?.organization_invite_token
-      
       const employeeData = {
         user_id: user.id,
-        organization_id: orgId, // Теперь правильный organization_id
+        organization_id: orgId,
         organization_type: organizationTypeValue,
         first_name: data.firstName,
         last_name: data.lastName,
         phone: phone,
-        role: employeeRole, // Сохраняем роль из токена
-        organization_invite_token: orgInviteToken, // Сохраняем токен для связи с пригласительной ссылкой
+        role: employeeRole,
+        organization_invite_token: orgInviteToken,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }
@@ -480,26 +683,31 @@ export const ProfileSetupPage = () => {
     setError(null)
 
     try {
-      // Пытаемся сохранить в БД (если таблица существует)
+      // Сохраняем в БД через RPC функцию (создает запись в user_profiles и organizations)
       try {
-        const { error: insertError } = await supabase
-          .from('organizations')
-          .insert({
-            user_id: user.id,
-            type: organizationType,
+        const { error: rpcError } = await supabase.rpc('create_organization', {
+          p_organization_type: organizationType,
+          p_name: data.name,
+          p_phone: data.phone,
+          p_address: data.address,
+        })
+
+        if (rpcError) {
+          throw rpcError
+        }
+
+        // Обновляем метаданные пользователя
+        await supabase.auth.updateUser({
+          data: {
+            organization_type: organizationType,
             name: data.name,
             phone: data.phone,
             address: data.address,
-            first_name: null, // Для организаций имя и фамилия не нужны
-            last_name: null,
-            city: null, // Для организаций город не обязателен
+          },
           })
-
-        if (insertError) {
-          throw insertError
-        }
       } catch (dbError: any) {
-        // Если таблицы нет, сохраняем в metadata (для фронтенда)
+        console.error('Ошибка создания организации:', dbError)
+        // Если RPC не работает, сохраняем в metadata (fallback)
         const { error: updateError } = await supabase.auth.updateUser({
           data: {
             profile_data: {
@@ -507,6 +715,7 @@ export const ProfileSetupPage = () => {
               phone: data.phone,
               address: data.address,
             },
+            organization_type: organizationType,
           },
         })
 
