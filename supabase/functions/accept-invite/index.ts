@@ -245,7 +245,7 @@ async function handleOrganizationEmployee(
 async function handleOrganizationClient(
   client: SupabaseClient,
   invite: InviteRecord,
-  payload: Required<Pick<AcceptInviteRequest, "password">> & { phone?: string; email?: string; firstName?: string; lastName?: string }
+  payload: Required<Pick<AcceptInviteRequest, "password" | "phone">> & { email?: string; firstName?: string; lastName?: string }
 ): Promise<HandlerResult> {
   const metaRaw = invite.organization_client_invite_tokens;
   const meta = Array.isArray(metaRaw) ? metaRaw[0] : metaRaw;
@@ -253,13 +253,9 @@ async function handleOrganizationClient(
     throw new Response("Invite metadata missing", { status: 400 });
   }
 
-  const phoneRaw = payload.phone ?? meta.invited_client_phone ?? undefined;
-  if (!phoneRaw) {
-    throw new Response("phone is required for client invite", { status: 400 });
-  }
-  const phone = normalizePhone(phoneRaw);
-  const pseudoEmail = phone
-    ? buildPseudoEmail(phone, "organization_client")
+  const normalizedPhone = normalizePhone(payload.phone);
+  const pseudoEmail = normalizedPhone
+    ? buildPseudoEmail(normalizedPhone, "organization_client")
     : `${crypto.randomUUID()}@client.diary.local`;
   
   // Используем переданный email или псевдо-email
@@ -268,12 +264,12 @@ async function handleOrganizationClient(
   const user = await createAuthUser(client, {
     email: finalEmail,
     password: payload.password,
-    phone,
+    phone: normalizedPhone,
     userMetadata: {
       invite_token: invite.token,
       organization_id: meta.organization_id,
       role: "client",
-      phone,
+      phone: normalizedPhone,
     },
   });
 
@@ -282,7 +278,7 @@ async function handleOrganizationClient(
     .insert({
       user_id: user.id,
       invited_by_organization_id: meta.organization_id,
-      phone,
+      phone: normalizedPhone,
       first_name: payload.firstName || "",
       last_name: payload.lastName || "",
     })
@@ -297,7 +293,7 @@ async function handleOrganizationClient(
       user_id: user.id,
       role: "client",
       client_id: clientId,
-      phone_e164: phone, // Сохраняем телефон в user_profiles
+      phone_e164: normalizedPhone, // Сохраняем телефон в user_profiles
       metadata: { source_invite: invite.token },
     }),
     client
@@ -330,7 +326,7 @@ async function handleOrganizationClient(
   const { error: updateInviteTokenError } = await client
     .from("organization_client_invite_tokens")
     .update({
-      invited_client_phone: phone,
+      invited_client_phone: normalizedPhone,
       invited_client_name: invitedName,
       metadata: {
         registered_at: new Date().toISOString(),
@@ -351,7 +347,7 @@ async function handleOrganizationClient(
     userId: user.id,
     role: "client",
     clientId,
-    loginPhone: phone,
+    loginPhone: normalizedPhone,
     loginEmail: finalEmail, // Сохраняем email для входа
   };
 }
@@ -359,7 +355,7 @@ async function handleOrganizationClient(
 async function handleCaregiverClient(
   client: SupabaseClient,
   invite: InviteRecord,
-  payload: Required<Pick<AcceptInviteRequest, "password">> & { phone?: string; email?: string; firstName?: string; lastName?: string }
+  payload: Required<Pick<AcceptInviteRequest, "password" | "phone">> & { email?: string; firstName?: string; lastName?: string }
 ): Promise<HandlerResult> {
   const metaRaw = invite.caregiver_client_invite_tokens;
   const meta = Array.isArray(metaRaw) ? metaRaw[0] : metaRaw;
@@ -367,12 +363,10 @@ async function handleCaregiverClient(
     throw new Response("Invite metadata missing", { status: 400 });
   }
 
-  const phoneRaw = payload.phone ?? meta.invited_client_phone ?? undefined;
-  if (!phoneRaw) {
-    throw new Response("phone is required for client invite", { status: 400 });
-  }
-  const phone = normalizePhone(phoneRaw);
-  const pseudoEmail = buildPseudoEmail(phone, "caregiver_client");
+  const normalizedPhone = normalizePhone(payload.phone);
+  const pseudoEmail = normalizedPhone
+    ? buildPseudoEmail(normalizedPhone, "caregiver_client")
+    : `${crypto.randomUUID()}@client.diary.local`;
   
   // Используем переданный email или псевдо-email
   const finalEmail = payload.email ?? pseudoEmail;
@@ -380,12 +374,12 @@ async function handleCaregiverClient(
   const user = await createAuthUser(client, {
     email: finalEmail,
     password: payload.password,
-    phone,
+    phone: normalizedPhone,
     userMetadata: {
       invite_token: invite.token,
       caregiver_id: meta.caregiver_id,
       role: "client",
-      phone,
+      phone: normalizedPhone,
     },
   });
 
@@ -394,7 +388,7 @@ async function handleCaregiverClient(
     .insert({
       user_id: user.id,
       invited_by_caregiver_id: meta.caregiver_id,
-      phone,
+      phone: normalizedPhone,
       first_name: payload.firstName || "",
       last_name: payload.lastName || "",
     })
@@ -408,7 +402,7 @@ async function handleCaregiverClient(
     user_id: user.id,
     role: "client",
     client_id: clientId,
-    phone_e164: phone, // Сохраняем телефон в user_profiles
+    phone_e164: normalizedPhone, // Сохраняем телефон в user_profiles
     metadata: { source_invite: invite.token },
   });
   if (profileError) throw profileError;
@@ -420,7 +414,7 @@ async function handleCaregiverClient(
   const { error: updateInviteTokenError } = await client
     .from("caregiver_client_invite_tokens")
     .update({
-      invited_client_phone: phone,
+      invited_client_phone: normalizedPhone,
       invited_client_name: invitedName,
       metadata: {
         registered_at: new Date().toISOString(),
@@ -441,7 +435,7 @@ async function handleCaregiverClient(
     userId: user.id,
     role: "client",
     clientId,
-    loginPhone: phone,
+    loginPhone: normalizedPhone,
     loginEmail: finalEmail, // Сохраняем email для входа
   };
 }
@@ -471,21 +465,29 @@ async function acceptInviteHandler(client: SupabaseClient, payload: AcceptInvite
     }
     case "organization_client": {
       // Для клиентов firstName и lastName опциональны (заполняются в ProfileSetupPage)
+      const phone = payload.phone ?? invite.metadata?.["phone"]?.toString();
+      if (!phone) {
+        throw new Response("phone is required for client invite", { status: 400 });
+      }
       return await handleOrganizationClient(client, invite, {
         password,
+        phone,
         firstName: firstName || undefined,
         lastName: lastName || undefined,
-        phone: payload.phone,
         email: payload.email,
       });
     }
     case "caregiver_client": {
       // Для клиентов firstName и lastName опциональны (заполняются в ProfileSetupPage)
+      const phone = payload.phone ?? invite.metadata?.["phone"]?.toString();
+      if (!phone) {
+        throw new Response("phone is required for client invite", { status: 400 });
+      }
       return await handleCaregiverClient(client, invite, {
         password,
+        phone,
         firstName: firstName || undefined,
         lastName: lastName || undefined,
-        phone: payload.phone,
         email: payload.email,
       });
     }
