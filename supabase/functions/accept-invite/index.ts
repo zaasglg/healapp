@@ -345,22 +345,47 @@ async function handleOrganizationClient(
     user_id: user.id,
   });
   
-  // Сначала проверяем, существует ли запись
-  const { data: existingToken, error: checkError } = await client
+  // Обновляем organization_client_invite_tokens с данными зарегистрированного клиента
+  // Используем upsert на случай, если запись не существует
+  console.log("Attempting to update organization_client_invite_tokens for invite_id:", invite.id);
+  const { data: updatedData, error: updateInviteTokenError } = await client
     .from("organization_client_invite_tokens")
-    .select("invite_id")
+    .update({
+      invited_client_phone: normalizedPhone,
+      invited_client_name: invitedName,
+      metadata: {
+        registered_at: new Date().toISOString(),
+        user_id: user.id,
+        client_id: clientId,
+      },
+    })
     .eq("invite_id", invite.id)
-    .single();
-  
-  if (checkError && checkError.code !== 'PGRST116') {
-    console.error("Error checking organization_client_invite_tokens:", checkError);
-  }
-  
-  if (existingToken) {
-    // Запись существует, обновляем
-    const { data: updatedData, error: updateInviteTokenError } = await client
+    .select();
+
+  console.log("Update result:", { 
+    hasError: !!updateInviteTokenError, 
+    error: updateInviteTokenError,
+    updatedCount: updatedData?.length || 0,
+    updatedData 
+  });
+
+  // Если ошибка ИЛИ запись не найдена (0 строк обновлено), пытаемся вставить
+  if (updateInviteTokenError || !updatedData || updatedData.length === 0) {
+    if (updateInviteTokenError) {
+      console.error("Error updating organization_client_invite_tokens:", updateInviteTokenError);
+    } else {
+      console.log("No rows updated, record may not exist. Attempting insert...");
+    }
+    
+    console.log("Attempting to insert organization_client_invite_tokens record...");
+    const { data: insertedData, error: insertError } = await client
       .from("organization_client_invite_tokens")
-      .update({
+      .insert({
+        invite_id: invite.id,
+        invite_type: "organization_client",
+        organization_id: meta.organization_id,
+        patient_card_id: meta.patient_card_id,
+        diary_id: meta.diary_id,
         invited_client_phone: normalizedPhone,
         invited_client_name: invitedName,
         metadata: {
@@ -369,17 +394,21 @@ async function handleOrganizationClient(
           client_id: clientId,
         },
       })
-      .eq("invite_id", invite.id)
       .select();
-
-    if (updateInviteTokenError) {
-      console.error("Error updating organization_client_invite_tokens:", updateInviteTokenError);
-      // Не прерываем выполнение, так как это не критично
+    
+    console.log("Insert result:", { 
+      hasError: !!insertError, 
+      error: insertError,
+      insertedData 
+    });
+    
+    if (insertError) {
+      console.error("Error inserting organization_client_invite_tokens:", insertError);
     } else {
-      console.log("✅ Successfully updated organization_client_invite_tokens:", updatedData);
+      console.log("✅ Successfully inserted organization_client_invite_tokens:", insertedData);
     }
   } else {
-    console.warn("⚠️ organization_client_invite_tokens record not found for invite_id:", invite.id);
+    console.log("✅ Successfully updated organization_client_invite_tokens:", updatedData);
   }
 
   await markInviteUsed(client, invite.id, user.id);
@@ -474,22 +503,45 @@ async function handleCaregiverClient(
     user_id: user.id,
   });
   
-  // Сначала проверяем, существует ли запись
-  const { data: existingToken, error: checkError } = await client
+  // Обновляем caregiver_client_invite_tokens с данными зарегистрированного клиента
+  // Используем upsert на случай, если запись не существует
+  console.log("Attempting to update caregiver_client_invite_tokens for invite_id:", invite.id);
+  const { data: updatedData, error: updateInviteTokenError } = await client
     .from("caregiver_client_invite_tokens")
-    .select("invite_id")
+    .update({
+      invited_client_phone: normalizedPhone,
+      invited_client_name: invitedName,
+      metadata: {
+        registered_at: new Date().toISOString(),
+        user_id: user.id,
+        client_id: clientId,
+      },
+    })
     .eq("invite_id", invite.id)
-    .single();
-  
-  if (checkError && checkError.code !== 'PGRST116') {
-    console.error("Error checking caregiver_client_invite_tokens:", checkError);
-  }
-  
-  if (existingToken) {
-    // Запись существует, обновляем
-    const { data: updatedData, error: updateInviteTokenError } = await client
+    .select();
+
+  console.log("Update result:", { 
+    hasError: !!updateInviteTokenError, 
+    error: updateInviteTokenError,
+    updatedCount: updatedData?.length || 0,
+    updatedData 
+  });
+
+  // Если ошибка ИЛИ запись не найдена (0 строк обновлено), пытаемся вставить
+  if (updateInviteTokenError || !updatedData || updatedData.length === 0) {
+    if (updateInviteTokenError) {
+      console.error("Error updating caregiver_client_invite_tokens:", updateInviteTokenError);
+    } else {
+      console.log("No rows updated, record may not exist. Attempting insert...");
+    }
+    
+    console.log("Attempting to insert caregiver_client_invite_tokens record...");
+    const { data: insertedData, error: insertError } = await client
       .from("caregiver_client_invite_tokens")
-      .update({
+      .insert({
+        invite_id: invite.id,
+        invite_type: "caregiver_client",
+        caregiver_id: meta.caregiver_id,
         invited_client_phone: normalizedPhone,
         invited_client_name: invitedName,
         metadata: {
@@ -498,17 +550,21 @@ async function handleCaregiverClient(
           client_id: clientId,
         },
       })
-      .eq("invite_id", invite.id)
       .select();
-
-    if (updateInviteTokenError) {
-      console.error("Error updating caregiver_client_invite_tokens:", updateInviteTokenError);
-      // Не прерываем выполнение, так как это не критично
+    
+    console.log("Insert result:", { 
+      hasError: !!insertError, 
+      error: insertError,
+      insertedData 
+    });
+    
+    if (insertError) {
+      console.error("Error inserting caregiver_client_invite_tokens:", insertError);
     } else {
-      console.log("✅ Successfully updated caregiver_client_invite_tokens:", updatedData);
+      console.log("✅ Successfully inserted caregiver_client_invite_tokens:", insertedData);
     }
   } else {
-    console.warn("⚠️ caregiver_client_invite_tokens record not found for invite_id:", invite.id);
+    console.log("✅ Successfully updated caregiver_client_invite_tokens:", updatedData);
   }
 
   await markInviteUsed(client, invite.id, user.id);
