@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
 import { supabase } from '@/lib/supabase'
-import { Button, Modal, Input, Checkbox } from '@/components/ui'
+import { Button, Modal, Input } from '@/components/ui'
 
 type OrganizationType = 'pension' | 'patronage_agency' | 'caregiver'
 
@@ -16,13 +16,13 @@ interface PatientCard {
   mobility: 'walks' | 'sits' | 'lies'
 }
 
-interface Diary {
-  id: string
-  owner_id: string
-  client_id: string
-  patient_card_id: string
-  caregiver_id: string | null
-  organization_id: string | null
+// interface Diary {
+//   id: string
+//   owner_id: string
+//   client_id: string
+//   patient_card_id: string
+//   caregiver_id: string | null
+//   organization_id: string | null
   organization_type: OrganizationType | null
   created_at: string
 }
@@ -75,7 +75,7 @@ export const CreateDiaryPage = () => {
   const [showPinnedModal, setShowPinnedModal] = useState(false)
   const [showAllModal, setShowAllModal] = useState(false)
   const [newCustomMetric, setNewCustomMetric] = useState('')
-  const [customMetricCategory, setCustomMetricCategory] = useState<'care' | 'physical' | 'excretion' | 'symptom'>('care')
+  // const [customMetricCategory, setCustomMetricCategory] = useState<'care' | 'physical' | 'excretion' | 'symptom'>('care')
   const [customCareMetrics, setCustomCareMetrics] = useState<string[]>([])
   const [customPhysicalMetrics, setCustomPhysicalMetrics] = useState<string[]>([])
   const [customExcretionMetrics, setCustomExcretionMetrics] = useState<string[]>([])
@@ -196,13 +196,13 @@ export const CreateDiaryPage = () => {
     )
   }
 
-  const handleAddCustomMetric = () => {
-    if (newCustomMetric.trim()) {
-      const customValue = `custom_${Date.now()}`
-      setSelectedAll([...selectedAll, customValue])
-      setNewCustomMetric('')
-    }
-  }
+  // const handleAddCustomMetric = () => {
+  //   if (newCustomMetric.trim()) {
+  //     const customValue = `custom_${Date.now()}`
+  //     setSelectedAll([...selectedAll, customValue])
+  //     setNewCustomMetric('')
+  //   }
+  // }
 
   const handleAddCareMetric = () => {
     if (newCareMetric.trim() && !customCareMetrics.includes(newCareMetric.trim())) {
@@ -252,16 +252,16 @@ export const CreateDiaryPage = () => {
     }
   }
 
-  const handleNext = () => {
-    if (step === 1) {
-      if (!selectedCardId) {
-        alert('Выберите карточку подопечного')
-        return
-      }
-      window.scrollTo({ top: 0, behavior: 'smooth' })
-      setStep(2)
-    }
-  }
+  // const handleNext = () => {
+  //   if (step === 1) {
+  //     if (!selectedCardId) {
+  //       alert('Выберите карточку подопечного')
+  //       return
+  //     }
+  //     window.scrollTo({ top: 0, behavior: 'smooth' })
+  //     setStep(2)
+  //   }
+  // }
 
   const handleBack = () => {
     if (step === 2) {
@@ -411,8 +411,8 @@ export const CreateDiaryPage = () => {
     }
   }
 
-  const selectedCard = availableCards.find(c => c.id === selectedCardId)
-  const allAvailableMetrics = [...CARE_METRICS, ...PHYSICAL_METRICS, ...EXCRETION_METRICS, ...SYMPTOM_METRICS]
+  // const selectedCard = availableCards.find(c => c.id === selectedCardId)
+  // const allAvailableMetrics = [...CARE_METRICS, ...PHYSICAL_METRICS, ...EXCRETION_METRICS, ...SYMPTOM_METRICS]
 
   return (
     <div className="min-h-screen bg-gray-100">

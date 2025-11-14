@@ -4,12 +4,12 @@ import { useAuthStore } from '@/store/authStore'
 import { Button, Input, Modal } from '@/components/ui'
 import { supabase } from '@/lib/supabase'
 
-interface DiaryMetric {
-  id: string
-  diary_id: string
-  metric_type: string
-  is_pinned: boolean
-}
+// interface DiaryMetric {
+//   id: string
+//   diary_id: string
+//   metric_type: string
+//   is_pinned: boolean
+// }
 
 interface CustomMetric {
   id: string

@@ -49,8 +49,8 @@ const formatPhone = (raw: string) => {
 export const ClientInviteRegisterPage = () => {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const { setUser } = useAuthStore()
-  const diaryId = searchParams.get('diary') || ''
+  // const { setUser } = useAuthStore()
+  // const diaryId = searchParams.get('diary') || ''
   const token = searchParams.get('token') || ''
   // flowType будет определен после валидации токена
   const [flowType, setFlowType] = useState<'organization' | 'caregiver' | null>(null)

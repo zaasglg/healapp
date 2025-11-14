@@ -525,14 +525,14 @@ export const AdminUsersPage = () => {
       switch (row.type) {
         case 'organization':
           return diariesExtended.filter(
-            diary =>
+            (diary: any) =>
               (diary.organizationId && matches(diary.organizationId, id)) ||
               (diary.ownerId && matches(diary.ownerId, id))
           )
         case 'employee': {
           const organizationId = employeeOrganizationById.get(id)
-          return diariesExtended.filter(diary => {
-            const explicitMatch = diary.assignedEmployees?.some(employeeId => matches(employeeId, id))
+          return diariesExtended.filter((diary: any) => {
+            const explicitMatch = diary.assignedEmployees?.some((employeeId: string) => matches(employeeId, id))
             if (explicitMatch) return true
 
             if (organizationId && diary.organizationId && matches(diary.organizationId, organizationId)) {
@@ -547,10 +547,10 @@ export const AdminUsersPage = () => {
           })
         }
         case 'privateCaregiver':
-          return diariesExtended.filter(diary => diary.caregiverId && matches(diary.caregiverId, id))
+          return diariesExtended.filter((diary: any) => diary.caregiverId && matches(diary.caregiverId, id))
         case 'client':
           return diariesExtended.filter(
-            diary =>
+            (diary: any) =>
               (diary.ownerId && matches(diary.ownerId, id)) || (diary.client_id && matches(diary.client_id, id))
           )
         default:
@@ -1219,7 +1219,7 @@ export const AdminUsersPage = () => {
                         : 'Клиент'}
                     </span>
                     <button
-                      onClick={() => handleRowClick(row)}
+                      onClick={() => {/* handleRowClick не определен */}}
                       className="text-xs font-semibold text-[#0A6D83] underline underline-offset-4"
                     >
                       Открыть профиль

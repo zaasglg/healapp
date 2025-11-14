@@ -7,10 +7,7 @@ export const Header = () => {
   const location = useLocation()
   const { user } = useAuthStore()
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-    navigate('/login')
-  }
+  // handleLogout удален - не используется
 
   // Показываем Header только на определенных страницах
   const showHeader = location.pathname !== '/profile/setup'
