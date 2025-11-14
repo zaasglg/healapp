@@ -23,9 +23,9 @@ interface PatientCard {
 //   patient_card_id: string
 //   caregiver_id: string | null
 //   organization_id: string | null
-  organization_type: OrganizationType | null
-  created_at: string
-}
+//   organization_type: OrganizationType | null
+//   created_at: string
+// }
 
 const CARE_METRICS = [
   { value: 'walk', label: 'Прогулка' },
