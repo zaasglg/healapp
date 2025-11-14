@@ -438,18 +438,16 @@ export const RegisterPage = () => {
       await new Promise(resolve => setTimeout(resolve, 200))
 
       // Обрабатываем pending токены доступа к дневникам через бэкенд
-      if (authData.user?.id) {
+      if (finalUser?.id) {
         try {
           const { data: processResult, error: processError } = await supabase.rpc('process_pending_diary_access', {
-            p_user_id: authData.user.id
+            p_user_id: finalUser.id
           })
           
           if (!processError && processResult?.success_count > 0) {
             console.log('[RegisterPage] Обработано pending токенов:', processResult.success_count)
             // Инвалидируем кэш для dashboard
-            const { queryClient } = await import('@tanstack/react-query')
-            const queryClientInstance = queryClient.getQueryClient()
-            await queryClientInstance.invalidateQueries({ queryKey: ['dashboard-diaries'] })
+            await queryClient.invalidateQueries({ queryKey: ['dashboard-diaries'] })
           }
         } catch (error) {
           console.error('[RegisterPage] Ошибка обработки pending токенов:', error)

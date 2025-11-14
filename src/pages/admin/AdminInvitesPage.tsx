@@ -45,6 +45,8 @@ interface LocalInvite extends BaseInvite {
   type: InviteType
 }
 
+type CombinedInvite = OrganizationInvite | LocalInvite
+
 const inviteTypeOptions: { value: InviteType; label: string }[] = [
   { value: 'organization', label: 'Организация' },
   { value: 'employee', label: 'Сотрудник организации' },
@@ -257,12 +259,12 @@ export const AdminInvitesPage = () => {
     }
 
     combinedInvites.forEach(invite => {
-      const type =
+      const type: InviteType =
         invite.source === 'supabase'
           ? 'organization'
           : invite.type
 
-      base.byType[type] += 1
+      base.byType[type] = (base.byType[type] || 0) + 1
 
       const isActive =
         invite.source === 'supabase'
@@ -327,7 +329,7 @@ export const AdminInvitesPage = () => {
           nextRecord.created_by = '—'
         }
         if (selectedType === 'employee') {
-          upsertEmployeeInviteToken(nextRecord)
+          upsertEmployeeInviteToken({ ...nextRecord, token: nextRecord.id })
         } else {
           const existing = JSON.parse(localStorage.getItem(storageKey) || '[]')
           const next = [nextRecord, ...existing]
@@ -540,7 +542,7 @@ export const AdminInvitesPage = () => {
                             <Button variant="outline" size="sm" onClick={() => handleCopy(invite.link)}>
                               Скопировать
                             </Button>
-                            <Button variant="ghost" size="sm" disabled>
+                            <Button variant="outline" size="sm" disabled>
                               Отключить
                             </Button>
                           </div>

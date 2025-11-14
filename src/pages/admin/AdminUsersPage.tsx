@@ -990,10 +990,10 @@ export const AdminUsersPage = () => {
                 <Button variant="outline" onClick={handleResetPassword}>
                   Сбросить пароль
                 </Button>
-                <Button variant="ghost" disabled>
+                <Button variant="outline" disabled>
                   Заблокировать доступ
                 </Button>
-                <Button variant="ghost" disabled>
+                <Button variant="outline" disabled>
                   Удалить пользователя
                 </Button>
               </div>
