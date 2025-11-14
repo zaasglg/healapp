@@ -74,7 +74,7 @@ export const CreateDiaryPage = () => {
   const [selectedAll, setSelectedAll] = useState<string[]>([])
   const [showPinnedModal, setShowPinnedModal] = useState(false)
   const [showAllModal, setShowAllModal] = useState(false)
-  const [newCustomMetric, setNewCustomMetric] = useState('')
+  // const [newCustomMetric, setNewCustomMetric] = useState('')
   // const [customMetricCategory, setCustomMetricCategory] = useState<'care' | 'physical' | 'excretion' | 'symptom'>('care')
   const [customCareMetrics, setCustomCareMetrics] = useState<string[]>([])
   const [customPhysicalMetrics, setCustomPhysicalMetrics] = useState<string[]>([])

@@ -110,7 +110,7 @@ export const AdminMonitoringPage = () => {
   }, [diaries])
 
   const entriesActivityChart = useMemo(() => {
-    const { buckets, map } = buildWeekBuckets()
+    const { buckets } = buildWeekBuckets()
     const daySets = new Map<string, Set<string>>()
     buckets.forEach(bucket => {
       daySets.set(bucket.key, new Set<string>())

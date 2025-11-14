@@ -386,15 +386,15 @@ export const ProfilePage = () => {
   const isClient = organizationType === 'client'
   const isCaregiver = organizationType === 'caregiver'
 
-  const handleLogout = async () => {
-    try {
-      await logout()
-      navigate('/login', { replace: true })
-    } catch (error) {
-      console.error('Ошибка при выходе из аккаунта', error)
-      navigate('/login', { replace: true })
-    }
-  }
+  // const handleLogout = async () => {
+  //   try {
+  //     await logout()
+  //     navigate('/login', { replace: true })
+  //   } catch (error) {
+  //     console.error('Ошибка при выходе из аккаунта', error)
+  //     navigate('/login', { replace: true })
+  //   }
+  // }
   
   // Получаем имя (первое слово для отображения в карточке)
   const displayName = (isEmployee || isClient) && profileData.firstName 

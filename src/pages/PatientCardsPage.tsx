@@ -87,40 +87,40 @@ export const PatientCardsPage = () => {
   }, [user, navigate])
 
   const canCreateCard = () => {
-    const userRole = user?.user_metadata?.role || user?.user_metadata?.user_role
-    const organizationType = user?.user_metadata?.organization_type
+    const _userRole = user?.user_metadata?.role || user?.user_metadata?.user_role
+    const _organizationType = user?.user_metadata?.organization_type
 
     // Сотрудники организаций НЕ могут создавать карточки
-    if (userRole === 'org_employee') return false
+    if (_userRole === 'org_employee') return false
 
     // Клиенты могут создавать карточки
-    if (userRole === 'client') return true
+    if (_userRole === 'client') return true
 
     // Организации могут создавать карточки
-    if (organizationType === 'pension' || organizationType === 'patronage_agency') return true
+    if (_organizationType === 'pension' || _organizationType === 'patronage_agency') return true
 
     // Частные сиделки НЕ могут создавать карточки
-    if (organizationType === 'caregiver') return false
+    if (_organizationType === 'caregiver') return false
 
     // Сотрудники организаций НЕ могут создавать карточки
     return false
   }
 
   const canEditCard = () => {
-    const userRole = user?.user_metadata?.role || user?.user_metadata?.user_role
-    const organizationType = user?.user_metadata?.organization_type
+    const _userRole = user?.user_metadata?.role || user?.user_metadata?.user_role
+    const _organizationType = user?.user_metadata?.organization_type
 
     // Клиенты могут редактировать карточки
-    if (userRole === 'client') return true
+    if (_userRole === 'client') return true
 
     // Организации могут редактировать карточки
-    if (organizationType === 'pension' || organizationType === 'patronage_agency') return true
+    if (_organizationType === 'pension' || _organizationType === 'patronage_agency') return true
 
     // Частные сиделки НЕ могут редактировать карточки
-    if (organizationType === 'caregiver') return false
+    if (_organizationType === 'caregiver') return false
 
     // Сотрудники организаций НЕ могут редактировать карточки
-    if (userRole === 'org_employee') return false
+    if (_userRole === 'org_employee') return false
 
     return false
   }

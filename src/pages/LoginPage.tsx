@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -23,14 +23,14 @@ export const LoginPage = () => {
   const [searchParams] = useSearchParams()
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const employeeId = searchParams.get('employee_id')
-  const clientId = searchParams.get('client_id')
+  // const employeeId = searchParams.get('employee_id')
+  // const clientId = searchParams.get('client_id')
 
   const {
     register,
     handleSubmit,
     formState: { errors },
-    setValue,
+    // setValue,
   } = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
   })

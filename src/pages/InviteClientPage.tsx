@@ -37,7 +37,7 @@ export const InviteClientPage = () => {
     try {
       // Убеждаемся, что у сиделки есть запись в organizations
       // Это нужно для работы current_organization_id() в RPC функции
-      const { data: existingOrg, error: checkError } = await supabase
+      const { data: _existingOrg, error: checkError } = await supabase
         .from('organizations')
         .select('id')
         .eq('user_id', user.id)

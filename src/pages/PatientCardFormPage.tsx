@@ -360,26 +360,26 @@ const sanitizeFormValues = (values: Partial<PatientCardFormData>): PatientCardFo
   }
 
   // Получаем organization_id для создания временного клиента
-  const getOrganizationId = async (): Promise<string | null> => {
-    if (!user) return null
-
-    try {
-      // Пробуем получить organization_id из таблицы organizations
-      const { data: org, error } = await supabase
-        .from('organizations')
-        .select('id')
-        .eq('user_id', user.id)
-        .single()
-
-      if (!error && org) {
-        return org.id
-      }
-    } catch (error) {
-      console.error('Error getting organization_id:', error)
-    }
-
-    return null
-  }
+  // const getOrganizationId = async (): Promise<string | null> => {
+  //   if (!user) return null
+  //
+  //   try {
+  //     // Пробуем получить organization_id из таблицы organizations
+  //     const { data: org, error } = await supabase
+  //       .from('organizations')
+  //       .select('id')
+  //       .eq('user_id', user.id)
+  //       .single()
+  //
+  //     if (!error && org) {
+  //       return org.id
+  //     }
+  //   } catch (error) {
+  //     console.error('Error getting organization_id:', error)
+  //   }
+  //
+  //   return null
+  // }
 
   const persistCurrentValues = () => {
     if (!canEdit()) return

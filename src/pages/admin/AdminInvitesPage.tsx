@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
-import { supabase } from '@/lib/supabase'
-import { Button, Input } from '@/components/ui'
+// import { supabase } from '@/lib/supabase'
+import { Button } from '@/components/ui'
 import { ensureEmployeeInviteTokens, upsertEmployeeInviteToken } from '@/utils/inviteStorage'
 
 type InviteType = 'organization' | 'employee' | 'client' | 'privateCaregiver'
@@ -74,7 +74,7 @@ export const AdminInvitesPage = () => {
   const [generatedLink, setGeneratedLink] = useState<string | null>(null)
 
   const [filterType, setFilterType] = useState<'all' | InviteType>('all')
-  const [searchQuery, setSearchQuery] = useState('')
+  // const [searchQuery, setSearchQuery] = useState('')
 
   const organizationInvites = useMemo<OrganizationInvite[]>(() => {
     try {
@@ -230,20 +230,21 @@ export const AdminInvitesPage = () => {
         }
       }
 
-      if (!searchQuery.trim()) {
-        return true
-      }
-
-      const query = searchQuery.trim().toLowerCase()
-      return (
-        invite.token.toLowerCase().includes(query) ||
-        (invite.source === 'supabase'
-          ? invite.organization_id.toLowerCase().includes(query)
-          : invite.owner_id.toLowerCase().includes(query)) ||
-        (invite.role || '').toLowerCase().includes(query)
-      )
+      // if (!searchQuery.trim()) {
+      //   return true
+      // }
+      //
+      // const query = searchQuery.trim().toLowerCase()
+      // return (
+      //   invite.token.toLowerCase().includes(query) ||
+      //   (invite.source === 'supabase'
+      //     ? invite.organization_id.toLowerCase().includes(query)
+      //     : invite.owner_id.toLowerCase().includes(query)) ||
+      //   (invite.role || '').toLowerCase().includes(query)
+      // )
+      return true
     })
-  }, [combinedInvites, filterType, searchQuery])
+  }, [combinedInvites, filterType])
 
   const stats = useMemo(() => {
     const base = {

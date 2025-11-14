@@ -389,15 +389,15 @@ export const EditDiaryMetricsPage = () => {
     }
   }
 
-  const getMetricLabel = (value: string) => {
-    const baseMetric = [...CARE_METRICS, ...PHYSICAL_METRICS, ...EXCRETION_METRICS, ...SYMPTOM_METRICS].find(metric => metric.value === value)
-    if (baseMetric) {
-      return baseMetric.label
-    }
-
-    const customMetric = customMetrics.find(metric => metric.id === value)
-    return customMetric?.label || value
-  }
+  // const getMetricLabel = (value: string) => {
+  //   const baseMetric = [...CARE_METRICS, ...PHYSICAL_METRICS, ...EXCRETION_METRICS, ...SYMPTOM_METRICS].find(metric => metric.value === value)
+  //   if (baseMetric) {
+  //     return baseMetric.label
+  //   }
+  //
+  //   const customMetric = customMetrics.find(metric => metric.id === value)
+  //   return customMetric?.label || value
+  // }
 
   const getMetricButtonClasses = (isSelected: boolean, isDisabled: boolean) => {
     let classes = 'px-4 py-2 rounded-full text-sm font-semibold transition-all duration-200 '

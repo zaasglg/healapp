@@ -37,7 +37,7 @@ const TYPE_PRIORITY: Record<UserFilter, number> = {
   all: 99,
 }
 
-const asArray = (value: any) => (Array.isArray(value) ? value : [])
+// const asArray = (value: any) => (Array.isArray(value) ? value : [])
 
 const readArray = (keys: string[]): any[] => {
   for (const key of keys) {

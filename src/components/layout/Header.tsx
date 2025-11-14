@@ -1,9 +1,7 @@
-import { Link, useNavigate, useLocation } from 'react-router-dom'
-import { supabase } from '@/lib/supabase'
+import { Link, useLocation } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
 
 export const Header = () => {
-  const navigate = useNavigate()
   const location = useLocation()
   const { user } = useAuthStore()
 
