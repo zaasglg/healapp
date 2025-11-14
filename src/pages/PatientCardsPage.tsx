@@ -40,8 +40,8 @@ export const PatientCardsPage = () => {
         setIsLoading(true)
 
         // Определяем тип пользователя
-        const userRole = user.user_metadata?.role || user.user_metadata?.user_role
-        const organizationType = user.user_metadata?.organization_type
+        // const userRole = user.user_metadata?.role || user.user_metadata?.user_role
+        // const organizationType = user.user_metadata?.organization_type
 
         let query = supabase
           .from('patient_cards')

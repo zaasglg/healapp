@@ -19,7 +19,8 @@ interface ProfileData {
 
 export const ProfilePage = () => {
   const navigate = useNavigate()
-  const { user, logout } = useAuthStore()
+  const { user } = useAuthStore()
+  // const { user, logout } = useAuthStore()
   const [organizationType, setOrganizationType] = useState<OrganizationType | 'employee' | 'client' | null>(null)
   const [profileData, setProfileData] = useState<ProfileData | null>(null)
   const [isLoading, setIsLoading] = useState(true)

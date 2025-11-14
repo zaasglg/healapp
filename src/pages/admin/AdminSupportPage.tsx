@@ -557,17 +557,17 @@ export const AdminSupportPage = () => {
     setCardDraft(prev => (prev ? { ...prev, [field]: value } : prev))
   }
 
-  const handleToggleArrayField = (field: 'diagnoses' | 'services' | 'service_wishes', value: string) => {
-    setCardDraft(prev => {
-      if (!prev) return prev
-      const current = prev[field]
-      const exists = current.includes(value)
-      return {
-        ...prev,
-        [field]: exists ? current.filter(item => item !== value) : [...current, value],
-      }
-    })
-  }
+  // const handleToggleArrayField = (field: 'diagnoses' | 'services' | 'service_wishes', value: string) => {
+  //   setCardDraft(prev => {
+  //     if (!prev) return prev
+  //     const current = prev[field]
+  //     const exists = current.includes(value)
+  //     return {
+  //       ...prev,
+  //       [field]: exists ? current.filter(item => item !== value) : [...current, value],
+  //     }
+  //   })
+  // }
 
   const handleSaveCard = () => {
     if (!selectedDiary || !cardDraft || !selectedDiary.cardId) return
