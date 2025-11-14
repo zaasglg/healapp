@@ -20,7 +20,7 @@ interface ProfileData {
 export const ProfilePage = () => {
   const navigate = useNavigate()
   const { user, logout } = useAuthStore()
-  const [organizationType, setOrganizationType] = useState<OrganizationType | 'employee' | null>(null)
+  const [organizationType, setOrganizationType] = useState<OrganizationType | 'employee' | 'client' | null>(null)
   const [profileData, setProfileData] = useState<ProfileData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
 
@@ -41,48 +41,45 @@ export const ProfilePage = () => {
         if (userType && ['pension', 'patronage_agency', 'caregiver'].includes(userType)) {
           setOrganizationType(userType)
           
-          // СНАЧАЛА проверяем metadata (быстро, без запросов к БД)
-          const profileData = user.user_metadata?.profile_data
-          if (profileData) {
-            setProfileData({
-              name: userType === 'caregiver' 
-                ? `${profileData.firstName || ''} ${profileData.lastName || ''}`.trim()
-                : profileData.name || '',
-              type: userType,
-              phone: profileData.phone,
-              city: profileData.city,
-              address: profileData.address,
-            })
-            setIsLoading(false)
-            return
-          }
-          
-          // Только если нет metadata, пытаемся загрузить из БД (с таймаутом)
+          // Загружаем данные из БД (приоритет над metadata)
           try {
-            const timeoutPromise = new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('Timeout')), 2000) // 2 секунды таймаут
-            )
-            
-            const dbPromise = supabase
+            const { data, error: dbError } = await supabase
               .from('organizations')
               .select('*')
               .eq('user_id', user.id)
               .single()
 
-            const { data, error: dbError } = await Promise.race([dbPromise, timeoutPromise]) as any
-
             if (!dbError && data) {
               setProfileData({
                 name: data.name || '',
                 type: userType,
-                phone: data.phone,
-                city: data.city,
-                address: data.address,
+                phone: data.phone || null,
+                city: data.city || null,
+                address: data.address || null,
+                firstName: data.first_name || null,
+                lastName: data.last_name || null,
               })
+              setIsLoading(false)
+              return
             }
           } catch (err) {
-            // Таймаут или ошибка - используем пустые данные
-            console.log('DB query timeout or error, using metadata')
+            console.error('Ошибка загрузки организации из БД:', err)
+          }
+          
+          // Fallback: проверяем metadata, если БД не вернула данные
+          const profileData = user.user_metadata?.profile_data || user.user_metadata
+          if (profileData) {
+            setProfileData({
+              name: userType === 'caregiver' 
+                ? `${profileData.firstName || profileData.first_name || ''} ${profileData.lastName || profileData.last_name || ''}`.trim()
+                : profileData.name || '',
+              type: userType,
+              phone: profileData.phone || null,
+              city: profileData.city || null,
+              address: profileData.address || null,
+              firstName: profileData.firstName || profileData.first_name || null,
+              lastName: profileData.lastName || profileData.last_name || null,
+            })
           }
           setIsLoading(false)
           return
@@ -90,13 +87,65 @@ export const ProfilePage = () => {
 
         // Только если organization_type отсутствует, проверяем user_role (для сотрудников и клиентов)
         // Для сотрудников и клиентов из localStorage user_role может быть напрямую в user
-        const userRole = (user as any).user_role || user.user_metadata?.user_role as string | undefined
+        // В Edge Function сохраняется как 'role', но также может быть 'user_role'
+        let userRole = (user as any).user_role || 
+                       user.user_metadata?.user_role || 
+                       user.user_metadata?.role as string | undefined
+        
+        // Если роль не найдена в user_metadata, загружаем из user_profiles
+        if (!userRole) {
+          try {
+            console.log('ProfilePage: Role not found in metadata, loading from user_profiles...')
+            const { data: userProfile, error: profileError } = await supabase
+              .from('user_profiles')
+              .select('role')
+              .eq('user_id', user.id)
+              .maybeSingle()
+            
+            if (!profileError && userProfile?.role) {
+              userRole = userProfile.role
+              console.log('ProfilePage: Loaded role from user_profiles:', userRole)
+            } else if (profileError && profileError.code !== 'PGRST116') {
+              // PGRST116 = not found, это нормально для новых пользователей
+              console.error('ProfilePage: Error loading from user_profiles:', profileError)
+            }
+          } catch (err) {
+            console.error('ProfilePage: Error loading from user_profiles:', err)
+          }
+        }
+        
+        console.log('ProfilePage: Final userRole:', userRole)
         
         // КЛИЕНТ: проверяем первым (приоритет перед сотрудниками)
         if (userRole === 'client') {
           setOrganizationType('client' as any)
           
-          // Загружаем данные клиента из localStorage
+          // Загружаем данные клиента из Supabase (приоритет над localStorage)
+          try {
+            const { data: clientData, error: clientError } = await supabase
+              .from('clients')
+              .select('first_name, last_name, phone')
+              .eq('user_id', user.id)
+              .single()
+            
+            if (!clientError && clientData) {
+              const phone = clientData.phone || (user as any).phone || user.user_metadata?.phone || null
+              setProfileData({
+                name: `${clientData.first_name || ''} ${clientData.last_name || ''}`.trim(),
+                type: 'client' as any,
+                firstName: clientData.first_name,
+                lastName: clientData.last_name,
+                phone: phone,
+              })
+              setIsLoading(false)
+              console.log('✅ ProfilePage: Client profile loaded from Supabase')
+              return
+            }
+          } catch (err) {
+            console.error('Error loading client from Supabase:', err)
+          }
+          
+          // Fallback: Загружаем данные клиента из localStorage
           try {
             const clients = JSON.parse(localStorage.getItem('local_clients') || '[]')
             const clientData = clients.find((c: any) => c.user_id === user.id)
@@ -111,6 +160,7 @@ export const ProfilePage = () => {
                 phone: phone,
               })
               setIsLoading(false)
+              console.log('✅ ProfilePage: Client profile loaded from localStorage')
               return
             }
           } catch (err) {
@@ -130,19 +180,21 @@ export const ProfilePage = () => {
                 phone: phone,
               })
               setIsLoading(false)
+              console.log('✅ ProfilePage: Client profile loaded from current_user')
               return
             }
           } catch (err) {
             console.log('Error loading client from current_user:', err)
           }
           
+          // Если ничего не найдено, показываем ошибку
           setIsLoading(false)
           return
         }
         
         // СОТРУДНИК: проверяем вторым
         if (userRole === 'org_employee') {
-          setOrganizationType('employee')
+          console.log('ProfilePage: Detected org_employee, loading profile...')
           
           // Сначала проверяем localStorage (для фронтенд-решения)
           try {
@@ -150,6 +202,13 @@ export const ProfilePage = () => {
             const employeeData = employees.find((e: any) => e.user_id === user.id)
             
             if (employeeData) {
+              // Если first_name и last_name пустые, перенаправляем на заполнение профиля
+              if (!employeeData.first_name && !employeeData.last_name) {
+                console.log('ProfilePage: Employee in localStorage has no first_name/last_name, redirecting to setup')
+                navigate('/profile/setup')
+                return
+              }
+              
               const phone = (user as any).phone || user.user_metadata?.phone_for_login || user.user_metadata?.phone || employeeData.phone || null
               setProfileData({
                 name: `${employeeData.first_name || ''} ${employeeData.last_name || ''}`.trim(),
@@ -158,7 +217,9 @@ export const ProfilePage = () => {
                 lastName: employeeData.last_name,
                 phone: phone,
               })
+              setOrganizationType('employee')
               setIsLoading(false)
+              console.log('✅ ProfilePage: Employee profile loaded from localStorage')
               return
             }
           } catch (err) {
@@ -169,6 +230,13 @@ export const ProfilePage = () => {
           try {
             const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
             if (currentUser.profile_data) {
+              // Если first_name и last_name пустые, перенаправляем на заполнение профиля
+              if (!currentUser.profile_data.firstName && !currentUser.profile_data.lastName) {
+                console.log('ProfilePage: current_user profile_data has no firstName/lastName, redirecting to setup')
+                navigate('/profile/setup')
+                return
+              }
+              
               const phone = (user as any).phone || user.user_metadata?.phone_for_login || user.user_metadata?.phone || currentUser.profile_data.phone || null
               setProfileData({
                 name: `${currentUser.profile_data.firstName || ''} ${currentUser.profile_data.lastName || ''}`.trim(),
@@ -177,7 +245,9 @@ export const ProfilePage = () => {
                 lastName: currentUser.profile_data.lastName,
                 phone: phone,
               })
+              setOrganizationType('employee')
               setIsLoading(false)
+              console.log('✅ ProfilePage: Employee profile loaded from current_user')
               return
             }
           } catch (err) {
@@ -198,8 +268,26 @@ export const ProfilePage = () => {
 
             const { data, error: dbError } = await Promise.race([dbPromise, timeoutPromise]) as any
 
+            console.log('ProfilePage: DB query result:', { data, error: dbError, hasData: !!data })
+
             if (!dbError && data) {
               const phone = (user as any).phone || user.user_metadata?.phone_for_login || user.user_metadata?.phone || data.phone || null
+              
+              console.log('ProfilePage: Employee data from DB:', {
+                first_name: data.first_name,
+                last_name: data.last_name,
+                phone: phone,
+                hasFirstName: !!data.first_name,
+                hasLastName: !!data.last_name,
+              })
+              
+              // Если first_name и last_name пустые, перенаправляем на заполнение профиля
+              if (!data.first_name && !data.last_name) {
+                console.log('ProfilePage: Employee has no first_name/last_name, redirecting to setup')
+                navigate('/profile/setup')
+                return
+              }
+              
               setProfileData({
                 name: `${data.first_name || ''} ${data.last_name || ''}`.trim(),
                 type: 'employee',
@@ -207,6 +295,20 @@ export const ProfilePage = () => {
                 lastName: data.last_name,
                 phone: phone,
               })
+              setOrganizationType('employee')
+              setIsLoading(false)
+              console.log('✅ ProfilePage: Employee profile loaded successfully from DB')
+              return
+            } else if (dbError) {
+              console.error('ProfilePage: DB error:', dbError)
+              if (dbError.code === 'PGRST116') {
+                // Запись не найдена - перенаправляем на заполнение
+                console.log('ProfilePage: Employee record not found (PGRST116), redirecting to setup')
+                navigate('/profile/setup')
+                return
+              }
+              // Для других ошибок продолжаем проверку metadata
+              console.log('ProfilePage: DB error (not PGRST116), trying metadata fallback')
             }
           } catch (err) {
             // Таймаут или ошибка - используем metadata
@@ -221,12 +323,13 @@ export const ProfilePage = () => {
                 lastName: profileData.lastName,
                 phone: phone,
               })
+              setOrganizationType('employee')
+              console.log('✅ ProfilePage: Employee profile loaded from metadata fallback')
             } else {
-              setProfileData({
-                name: '',
-                type: 'employee',
-                phone: phone,
-              })
+              // Если нет данных ни в БД, ни в metadata - перенаправляем на заполнение
+              console.log('ProfilePage: No employee data found, redirecting to setup')
+              navigate('/profile/setup')
+              return
             }
           }
           setIsLoading(false)
@@ -488,10 +591,10 @@ export const ProfilePage = () => {
           <div className="px-4">
             <button
               onClick={() => {
-                // TODO: Реализовать связь с поддержкой (например, открыть WhatsApp или email)
-                if (profileData.phone) {
-                  window.open(`https://wa.me/${profileData.phone.replace(/\D/g, '')}`, '_blank')
-                }
+                // Открываем WhatsApp чат с поддержкой
+                const phoneNumber = '79244415365' // Номер без знака +
+                const whatsappUrl = `https://wa.me/${phoneNumber}`
+                window.open(whatsappUrl, '_blank')
               }}
               className="w-full py-3.5 px-6 rounded-3xl text-white font-manrope font-bold text-base shadow-lg active:opacity-90 transition-opacity"
               style={{

@@ -83,6 +83,11 @@ begin
       p_organization_id := v_org_id;
       p_organization_type := v_org_type;
       
+      -- ВАЖНО: Для сиделок (caregiver) автоматически устанавливаем caregiver_id, если не передан
+      if v_org_type = 'caregiver' and p_caregiver_id is null then
+        p_caregiver_id := v_org_id;
+      end if;
+      
     else
       raise exception 'Недостаточно прав для создания дневника' using errcode = '42501';
     end if;

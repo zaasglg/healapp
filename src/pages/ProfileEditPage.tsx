@@ -89,19 +89,13 @@ export const ProfileEditPage = () => {
         if (userType && ['pension', 'patronage_agency', 'caregiver'].includes(userType)) {
           setOrganizationType(userType)
           
-          // Пытаемся загрузить из БД (с таймаутом)
+          // Загружаем данные из БД (приоритет над metadata)
           try {
-            const timeoutPromise = new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('Timeout')), 2000) // 2 секунды таймаут
-            )
-            
-            const dbPromise = supabase
+            const { data, error: dbError } = await supabase
               .from('organizations')
               .select('*')
               .eq('user_id', user.id)
               .single()
-
-            const { data, error: dbError } = await Promise.race([dbPromise, timeoutPromise]) as any
 
             if (!dbError && data) {
               if (userType === 'caregiver') {
@@ -118,44 +112,29 @@ export const ProfileEditPage = () => {
                   address: data.address || '',
                 })
               }
-            } else {
-              // Если данных в БД нет, используем metadata
-              const profileData = user.user_metadata?.profile_data
-              if (profileData) {
-                if (userType === 'caregiver') {
-                  caregiverForm.reset({
-                    firstName: profileData.firstName || '',
-                    lastName: profileData.lastName || '',
-                    phone: profileData.phone || '',
-                    city: profileData.city || '',
-                  })
-                } else {
-                  organizationForm.reset({
-                    name: profileData.name || '',
-                    phone: profileData.phone || '',
-                    address: profileData.address || '',
-                  })
-                }
-              }
+              setIsLoadingProfile(false)
+              return
             }
           } catch (err) {
-            // Если таблицы нет, используем metadata
-            const profileData = user.user_metadata?.profile_data
-            if (profileData) {
-              if (userType === 'caregiver') {
-                caregiverForm.reset({
-                  firstName: profileData.firstName || '',
-                  lastName: profileData.lastName || '',
-                  phone: profileData.phone || '',
-                  city: profileData.city || '',
-                })
-              } else {
-                organizationForm.reset({
-                  name: profileData.name || '',
-                  phone: profileData.phone || '',
-                  address: profileData.address || '',
-                })
-              }
+            console.error('Ошибка загрузки организации из БД:', err)
+          }
+          
+          // Fallback: используем metadata, если БД не вернула данные
+          const profileData = user.user_metadata?.profile_data || user.user_metadata
+          if (profileData) {
+            if (userType === 'caregiver') {
+              caregiverForm.reset({
+                firstName: profileData.firstName || profileData.first_name || '',
+                lastName: profileData.lastName || profileData.last_name || '',
+                phone: profileData.phone || '',
+                city: profileData.city || '',
+              })
+            } else {
+              organizationForm.reset({
+                name: profileData.name || '',
+                phone: profileData.phone || '',
+                address: profileData.address || '',
+              })
             }
           }
           setIsLoadingProfile(false)
@@ -164,42 +143,68 @@ export const ProfileEditPage = () => {
 
         // Только если organization_type отсутствует, проверяем user_role (для сотрудников и клиентов)
         // Для сотрудников и клиентов из localStorage user_role может быть напрямую в user
-        const userRole = (user as any).user_role || user.user_metadata?.user_role as string | undefined
+        // В Edge Function сохраняется как 'role', но также может быть 'user_role'
+        let userRole = (user as any).user_role || 
+                       user.user_metadata?.user_role || 
+                       user.user_metadata?.role as string | undefined
+        
+        // Если роль не найдена в user_metadata, загружаем из user_profiles
+        if (!userRole) {
+          try {
+            console.log('ProfileEditPage: Role not found in metadata, loading from user_profiles...')
+            const { data: userProfile, error: profileError } = await supabase
+              .from('user_profiles')
+              .select('role')
+              .eq('user_id', user.id)
+              .single()
+            
+            if (!profileError && userProfile) {
+              userRole = userProfile.role
+              console.log('ProfileEditPage: Loaded role from user_profiles:', userRole)
+            }
+          } catch (err) {
+            console.error('ProfileEditPage: Error loading from user_profiles:', err)
+          }
+        }
+        
+        console.log('ProfileEditPage: Final userRole:', userRole)
         
         // КЛИЕНТ: проверяем первым (приоритет перед сотрудниками)
         if (userRole === 'client') {
           setOrganizationType('client')
           
-          // Загружаем данные клиента из localStorage
+          // Загружаем данные клиента из Supabase
           try {
-            const clients = JSON.parse(localStorage.getItem('local_clients') || '[]')
-            const clientData = clients.find((c: any) => c.user_id === user.id)
+            const { data: clientData, error: clientError } = await supabase
+              .from('clients')
+              .select('first_name, last_name')
+              .eq('user_id', user.id)
+              .single()
             
-            if (clientData) {
+            if (!clientError && clientData) {
               clientForm.reset({
                 firstName: clientData.first_name || '',
                 lastName: clientData.last_name || '',
               })
               setIsLoadingProfile(false)
+              console.log('✅ ProfileEditPage: Client profile loaded from Supabase')
               return
-            }
-          } catch (err) {
-            console.log('Error loading client from localStorage:', err)
-          }
-
-          // Если нет в local_clients, проверяем profile_data из current_user
-          try {
-            const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-            if (currentUser.profile_data) {
+            } else if (clientError && clientError.code === 'PGRST116') {
+              // Запись не найдена - используем пустые значения
+              console.log('ProfileEditPage: Client record not found, using empty values')
               clientForm.reset({
-                firstName: currentUser.profile_data.firstName || '',
-                lastName: currentUser.profile_data.lastName || '',
+                firstName: '',
+                lastName: '',
               })
               setIsLoadingProfile(false)
               return
+            } else if (clientError) {
+              console.error('Error loading client from Supabase:', clientError)
+              setError('Не удалось загрузить профиль клиента')
             }
           } catch (err) {
-            console.log('Error loading client from current_user:', err)
+            console.error('Error loading client from Supabase:', err)
+            setError('Ошибка при загрузке профиля')
           }
           
           // Если данных нет, устанавливаем пустые значения
@@ -212,79 +217,50 @@ export const ProfileEditPage = () => {
         }
         
         if (userRole === 'org_employee') {
+          console.log('ProfileEditPage: Detected org_employee, loading profile...')
           setOrganizationType('employee')
           
-          // Сначала проверяем localStorage (для фронтенд-решения)
+          // Загружаем данные сотрудника из Supabase
           try {
-            const employees = JSON.parse(localStorage.getItem('local_employees') || '[]')
-            const employeeData = employees.find((e: any) => e.user_id === user.id)
-            
-            if (employeeData) {
-              employeeForm.reset({
-                firstName: employeeData.first_name || '',
-                lastName: employeeData.last_name || '',
-              })
-              setIsLoadingProfile(false)
-              return
-            }
-          } catch (err) {
-            console.log('Error loading from localStorage:', err)
-          }
-
-          // Если нет в localStorage, проверяем profile_data из current_user
-          try {
-            const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-            if (currentUser.profile_data) {
-              employeeForm.reset({
-                firstName: currentUser.profile_data.firstName || '',
-                lastName: currentUser.profile_data.lastName || '',
-              })
-              setIsLoadingProfile(false)
-              return
-            }
-          } catch (err) {
-            console.log('Error loading from current_user:', err)
-          }
-
-          // Пытаемся загрузить из БД (с таймаутом)
-          try {
-            const timeoutPromise = new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('Timeout')), 2000) // 2 секунды таймаут
-            )
-            
-            const dbPromise = supabase
+            const { data, error: dbError } = await supabase
               .from('organization_employees')
-              .select('*')
+              .select('first_name, last_name')
               .eq('user_id', user.id)
               .single()
 
-            const { data, error: dbError } = await Promise.race([dbPromise, timeoutPromise]) as any
+            console.log('ProfileEditPage: DB query result:', { data, error: dbError, hasData: !!data })
 
             if (!dbError && data) {
               employeeForm.reset({
                 firstName: data.first_name || '',
                 lastName: data.last_name || '',
               })
-            } else {
-              // Если данных в БД нет, используем metadata
-              const profileData = user.user_metadata?.profile_data || (user as any).profile_data
-              if (profileData) {
-                employeeForm.reset({
-                  firstName: profileData.firstName || '',
-                  lastName: profileData.lastName || '',
-                })
-              }
+              setIsLoadingProfile(false)
+              console.log('✅ ProfileEditPage: Employee profile loaded from Supabase')
+              return
+            } else if (dbError && dbError.code === 'PGRST116') {
+              // Запись не найдена - используем пустые значения
+              console.log('ProfileEditPage: Employee record not found, using empty values')
+              employeeForm.reset({
+                firstName: '',
+                lastName: '',
+              })
+              setIsLoadingProfile(false)
+              return
+            } else if (dbError) {
+              console.error('ProfileEditPage: DB error:', dbError)
+              setError('Не удалось загрузить профиль сотрудника')
             }
           } catch (err) {
-            // Если таблицы нет, используем metadata
-            const profileData = user.user_metadata?.profile_data || (user as any).profile_data
-            if (profileData) {
-              employeeForm.reset({
-                firstName: profileData.firstName || '',
-                lastName: profileData.lastName || '',
-              })
-            }
+            console.error('ProfileEditPage: Error loading employee from Supabase:', err)
+            setError('Ошибка при загрузке профиля')
           }
+          
+          // Если данных нет, устанавливаем пустые значения
+          employeeForm.reset({
+            firstName: '',
+            lastName: '',
+          })
           setIsLoadingProfile(false)
           return
         }
@@ -368,59 +344,39 @@ export const ProfileEditPage = () => {
     setSuccessMessage(null)
 
     try {
-      // Получаем caregiver_id и organization_id из user
-      const caregiverId = (user as any).caregiver_id || user.user_metadata?.caregiver_id || null
-      const organizationId = (user as any).organization_id || user.user_metadata?.organization_id || null
-      const phone = (user as any).phone || user.user_metadata?.phone || null
-
-      // Сохраняем в localStorage (для фронтенда)
-      const clients = JSON.parse(localStorage.getItem('local_clients') || '[]')
-      const existingIndex = clients.findIndex((c: any) => c.user_id === user.id)
-      
-      const clientData = {
-        user_id: user.id,
-        caregiver_id: caregiverId,
-        organization_id: organizationId,
-        first_name: data.firstName,
-        last_name: data.lastName,
-        phone: phone,
-        updated_at: new Date().toISOString(),
-      }
-
-      if (existingIndex !== -1) {
-        clients[existingIndex] = { ...clients[existingIndex], ...clientData }
-      } else {
-        clients.push({
-          ...clientData,
-          created_at: new Date().toISOString(),
+      // Сохраняем в Supabase (таблица clients)
+      const { error: updateError } = await supabase
+        .from('clients')
+        .update({
+          first_name: data.firstName,
+          last_name: data.lastName,
         })
-      }
-      
-      localStorage.setItem('local_clients', JSON.stringify(clients))
+        .eq('user_id', user.id)
 
-      // Обновляем текущего пользователя в localStorage
-      const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-      currentUser.profile_data = {
-        firstName: data.firstName,
-        lastName: data.lastName,
-        phone: phone,
-        caregiver_id: caregiverId,
-        organization_id: organizationId,
+      if (updateError) {
+        console.error('Error updating client in Supabase:', updateError)
+        throw updateError
       }
-      localStorage.setItem('current_user', JSON.stringify(currentUser))
 
-      // Обновляем authStore
-      const { setUser } = useAuthStore.getState()
-      setUser({ ...user, ...currentUser } as any)
+      console.log('✅ ProfileEditPage: Client profile updated in Supabase')
+
+      // Также обновляем user_metadata для удобства
+      await supabase.auth.updateUser({
+        data: {
+          firstName: data.firstName,
+          lastName: data.lastName,
+        },
+      })
 
       setSuccessMessage('Профиль успешно обновлен!')
       
-      // Редирект на страницу профиля через 2 секунды
+      // Редирект на страницу настроек профиля через 2 секунды
       setTimeout(() => {
         navigate('/profile')
       }, 2000)
     } catch (err: any) {
-      setError(translateError(err))
+      console.error('Error saving client profile:', err)
+      setError(translateError(err) || 'Не удалось сохранить изменения. Попробуйте ещё раз.')
     } finally {
       setIsLoading(false)
     }
@@ -434,50 +390,107 @@ export const ProfileEditPage = () => {
     setSuccessMessage(null)
 
     try {
-      // Получаем organization_id
-      const orgId = (user as any).organization_id || user.user_metadata?.organization_id || 'temp'
+      // Получаем organization_id - сначала из user, затем из БД
+      let orgId = (user as any).organization_id || user.user_metadata?.organization_id
+      
+      // Если organization_id не найден, загружаем из user_profiles или organization_employees
+      if (!orgId || orgId === 'temp') {
+        try {
+          // Сначала пробуем user_profiles
+          const { data: userProfile } = await supabase
+            .from('user_profiles')
+            .select('organization_id')
+            .eq('user_id', user.id)
+            .single()
+          
+          if (userProfile?.organization_id) {
+            orgId = userProfile.organization_id
+          } else {
+            // Если нет в user_profiles, пробуем organization_employees
+            const { data: employeeData } = await supabase
+              .from('organization_employees')
+              .select('organization_id')
+              .eq('user_id', user.id)
+              .single()
+            
+            if (employeeData?.organization_id) {
+              orgId = employeeData.organization_id
+            }
+          }
+        } catch (err) {
+          console.error('ProfileEditPage: Error loading organization_id:', err)
+        }
+      }
+      
+      // Если все еще нет, используем 'temp' (fallback)
+      if (!orgId || orgId === 'temp') {
+        console.warn('ProfileEditPage: organization_id is still temp, using fallback')
+        orgId = 'temp'
+      }
       
       // Получаем телефон из user.phone (из регистрации) или из metadata
       const phone = (user as any).phone || user.user_metadata?.phone_for_login || user.user_metadata?.phone || null
 
-      // Сохраняем в localStorage (для фронтенда)
-      const employees = JSON.parse(localStorage.getItem('local_employees') || '[]')
-      const existingIndex = employees.findIndex((e: any) => e.user_id === user.id)
-      
-      const employeeData = {
+      // Сохраняем в Supabase
+      console.log('ProfileEditPage: Saving employee to Supabase:', {
         user_id: user.id,
         organization_id: orgId,
         first_name: data.firstName,
         last_name: data.lastName,
         phone: phone,
-        updated_at: new Date().toISOString(),
-      }
-
-      if (existingIndex !== -1) {
-        employees[existingIndex] = { ...employees[existingIndex], ...employeeData }
-      } else {
-        employees.push({
-          ...employeeData,
-          created_at: new Date().toISOString(),
-        })
+      })
+      
+      // Проверяем, существует ли запись в organization_employees
+      const { data: existingEmployee, error: checkError } = await supabase
+        .from('organization_employees')
+        .select('id')
+        .eq('user_id', user.id)
+        .single()
+      
+      if (checkError && checkError.code !== 'PGRST116') {
+        // PGRST116 = not found, это нормально для новой записи
+        console.error('ProfileEditPage: Error checking existing employee:', checkError)
+        throw checkError
       }
       
-      localStorage.setItem('local_employees', JSON.stringify(employees))
-
-      // Обновляем текущего пользователя в localStorage
-      const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-      currentUser.profile_data = {
-        firstName: data.firstName,
-        lastName: data.lastName,
-        phone: phone,
-        organization_id: orgId,
+      if (existingEmployee) {
+        // Обновляем существующую запись
+        const { error: updateError } = await supabase
+          .from('organization_employees')
+          .update({
+            first_name: data.firstName,
+            last_name: data.lastName,
+            phone: phone || null,
+          })
+          .eq('user_id', user.id)
+        
+        if (updateError) {
+          console.error('ProfileEditPage: Error updating employee in Supabase:', updateError)
+          throw updateError
+        }
+        
+        console.log('✅ ProfileEditPage: Employee updated in Supabase')
+      } else {
+        // Создаем новую запись (если не существует)
+        const { error: insertError } = await supabase
+          .from('organization_employees')
+          .insert({
+            user_id: user.id,
+            organization_id: orgId !== 'temp' ? orgId : null,
+            first_name: data.firstName,
+            last_name: data.lastName,
+            phone: phone || null,
+            role: 'caregiver', // Значение по умолчанию, если роль не найдена
+          })
+        
+        if (insertError) {
+          console.error('ProfileEditPage: Error inserting employee in Supabase:', insertError)
+          throw insertError
+        }
+        
+        console.log('✅ ProfileEditPage: Employee created in Supabase')
       }
-      localStorage.setItem('current_user', JSON.stringify(currentUser))
-
-      // Обновляем authStore
-      const { setUser } = useAuthStore.getState()
-      setUser({ ...user, ...currentUser } as any)
-
+      
       setSuccessMessage('Профиль успешно обновлен!')
       
       // Редирект на страницу настроек профиля через 2 секунды

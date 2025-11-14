@@ -24,6 +24,7 @@ export interface DiaryClientLink {
   organization_id?: string | null
   accepted_by?: string | null
   accepted_at?: string | null
+  client_id?: string | null
 }
 
 interface NormalizeOptions {

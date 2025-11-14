@@ -12,6 +12,8 @@ import { supabase } from '@/lib/supabase'
 
 const clientRegisterSchema = z
   .object({
+    firstName: z.string().min(1, 'Введите имя'),
+    lastName: z.string().min(1, 'Введите фамилию'),
     phone: z.string().min(10, 'Введите телефон'),
     password: z.string().min(6, 'Пароль должен быть не менее 6 символов'),
     confirmPassword: z.string().min(1, 'Подтвердите пароль'),
@@ -210,8 +212,8 @@ export const ClientInviteRegisterPage = () => {
           token: token,
           password: formData.password,
           phone: phone,
-          firstName: '', // Заполняется в ProfileSetupPage
-          lastName: '', // Заполняется в ProfileSetupPage
+          firstName: formData.firstName,
+          lastName: formData.lastName,
         }),
       })
 
@@ -272,7 +274,8 @@ export const ClientInviteRegisterPage = () => {
       // Небольшая задержка перед навигацией
       await new Promise(resolve => setTimeout(resolve, 200))
       
-      navigate('/profile/setup')
+      // Для клиентов переходим сразу на dashboard (без экрана заполнения профиля)
+      navigate('/dashboard')
     } catch (err: any) {
       console.error('Ошибка регистрации клиента организации', err)
       setError(err.message || 'Не удалось завершить регистрацию. Попробуйте ещё раз.')
@@ -316,8 +319,8 @@ export const ClientInviteRegisterPage = () => {
           token: token,
           password: formData.password,
           phone: phone,
-          firstName: '', // Заполняется в ProfileSetupPage
-          lastName: '', // Заполняется в ProfileSetupPage
+          firstName: formData.firstName,
+          lastName: formData.lastName,
         }),
       })
 
@@ -378,7 +381,8 @@ export const ClientInviteRegisterPage = () => {
       // Небольшая задержка перед навигацией
       await new Promise(resolve => setTimeout(resolve, 200))
       
-      navigate('/profile/setup')
+      // Для клиентов переходим сразу на dashboard (без экрана заполнения профиля)
+      navigate('/dashboard')
     } catch (err: any) {
       console.error('Ошибка регистрации клиента сиделки', err)
       setError(err.message || 'Не удалось завершить регистрацию. Попробуйте ещё раз.')
@@ -436,6 +440,20 @@ export const ClientInviteRegisterPage = () => {
         </div>
 
         <form onSubmit={handleSubmit(handleCaregiverSubmit)} className="bg-white rounded-3xl shadow-sm p-6 space-y-5">
+          <Input
+            label="Имя"
+            placeholder="Введите имя"
+            error={errors.firstName?.message}
+            fullWidth
+            {...register('firstName')}
+          />
+          <Input
+            label="Фамилия"
+            placeholder="Введите фамилию"
+            error={errors.lastName?.message}
+            fullWidth
+            {...register('lastName')}
+          />
           <Input
             label="Телефон"
             placeholder="+7 (___) ___-__-__"
@@ -504,6 +522,20 @@ export const ClientInviteRegisterPage = () => {
       </div>
 
       <form onSubmit={handleSubmit(handleOrganizationSubmit)} className="bg-white rounded-3xl shadow-sm p-6 space-y-5">
+        <Input
+          label="Имя"
+          placeholder="Введите имя"
+          error={errors.firstName?.message}
+          fullWidth
+          {...register('firstName')}
+        />
+        <Input
+          label="Фамилия"
+          placeholder="Введите фамилию"
+          error={errors.lastName?.message}
+          fullWidth
+          {...register('lastName')}
+        />
         <Input
           label="Телефон"
           placeholder="+7 (___) ___-__-__"

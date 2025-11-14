@@ -354,15 +354,12 @@ begin
   v_org := public.current_organization_id();
   v_client := public.current_client_id();
 
-  if v_role is null then
-    return false;
-  end if;
-
   if v_role = 'admin' then
     return true;
   end if;
 
-  if v_role in ('organization', 'org_employee') and v_org = p_organization_id then
+  -- Проверка для организаций (используем проверку через таблицу organizations, если role = null)
+  if (v_role in ('organization', 'org_employee') or (v_role is null and v_org is not null)) and v_org = p_organization_id then
     return true;
   end if;
 
@@ -416,7 +413,8 @@ begin
 
   v_org := public.current_organization_id();
 
-  if v_role = 'organization' then
+  -- Проверка для организаций (используем проверку через таблицу organizations, если role = null)
+  if v_role = 'organization' or (v_role is null and v_org is not null) then
     return exists (
       select 1 from organization_invite_tokens oit
       where oit.invite_id = p_invite_id

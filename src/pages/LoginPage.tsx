@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
+import { useQueryClient } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { translateError } from '@/lib/errorMessages'
@@ -18,6 +19,7 @@ type LoginFormData = z.infer<typeof loginSchema>
 
 export const LoginPage = () => {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [searchParams] = useSearchParams()
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -33,98 +35,74 @@ export const LoginPage = () => {
     resolver: zodResolver(loginSchema),
   })
 
-  // Если есть employee_id или client_id в URL, автоматически заполняем телефон
-  useEffect(() => {
-    if (employeeId) {
-      try {
-        const employees = JSON.parse(localStorage.getItem('local_employees') || '[]')
-        const employee = employees.find((e: any) => e.user_id === employeeId)
-        if (employee?.phone) {
-          setValue('login', employee.phone)
-          return
-        }
-      } catch (err) {
-        console.log('Could not find employee', err)
-      }
-    }
-
-    if (clientId) {
-      try {
-        const clients = JSON.parse(localStorage.getItem('local_clients') || '[]')
-        const client = clients.find((c: any) => c.user_id === clientId)
-        if (client?.phone) {
-          setValue('login', client.phone)
-        } else {
-          const users = JSON.parse(localStorage.getItem('local_users') || '[]')
-          const clientUser = users.find((u: any) => u.id === clientId)
-          if (clientUser?.phone) {
-            setValue('login', clientUser.phone)
-          }
-        }
-      } catch (err) {
-        console.log('Could not find client', err)
-      }
-    }
-  }, [employeeId, clientId, setValue])
+  // Убрано: автоматическое заполнение телефона из localStorage (все через бэкенд)
 
   const onSubmit = async (data: LoginFormData) => {
     setIsLoading(true)
     setError(null)
 
-    try {
-      // Определяем, является ли вход email или телефоном
-      const isEmail = data.login.includes('@')
-      
-      if (isEmail) {
-        // Вход по email (для организаций и сиделок) - через Supabase
-        try {
-          // ВАЖНО: Очищаем localStorage перед входом через Supabase (чтобы не было конфликта)
-          // Это критично для работы в одном браузере!
-          localStorage.removeItem('current_user')
-          localStorage.removeItem('auth_token')
-          
-          // Также выходим из возможной Supabase сессии сотрудника
-          try {
-            await supabase.auth.signOut()
-          } catch (err) {
-            // Игнорируем ошибку
-          }
-          
-          const result = await supabase.auth.signInWithPassword({
-            email: data.login,
-            password: data.password,
-          })
-
-          if (result.error) {
-            throw result.error
-          }
-
-          if (result.data.user) {
-            // Обновляем authStore
-            const { setUser, setSession } = useAuthStore.getState()
-            setUser(result.data.user)
-            setSession(result.data.session)
-            
-            console.log('Logged in as organization:', result.data.user.email)
-            
-            // Перенаправление на главную страницу
-            navigate('/dashboard')
-          }
-        } catch (err: any) {
-          setError(translateError(err))
-        } finally {
-          setIsLoading(false)
-        }
-      } else {
-        // Вход по телефону (для сотрудников) - через localStorage
-        // ВАЖНО: Очищаем Supabase сессию перед входом сотрудника (чтобы не было конфликта)
+    // Определяем, является ли вход email или телефоном
+    const isEmail = data.login.includes('@')
+    
+    if (isEmail) {
+      // Вход по email (для организаций и сиделок) - через Supabase
+      try {
+        // ВАЖНО: Очищаем localStorage перед входом через Supabase (чтобы не было конфликта)
+        // Это критично для работы в одном браузере!
+        localStorage.removeItem('current_user')
+        localStorage.removeItem('auth_token')
+        
+        // Также выходим из возможной Supabase сессии сотрудника
         try {
           await supabase.auth.signOut()
         } catch (err) {
           // Игнорируем ошибку
         }
         
-        // Форматируем телефон в международный формат
+        const result = await supabase.auth.signInWithPassword({
+          email: data.login,
+          password: data.password,
+        })
+
+        if (result.error) {
+          throw result.error
+        }
+
+        if (result.data.user) {
+          // Обновляем authStore
+          const { setUser, setSession } = useAuthStore.getState()
+          setUser(result.data.user)
+          setSession(result.data.session)
+          
+          console.log('Logged in as organization:', result.data.user.email)
+          
+          // Обрабатываем pending токены доступа к дневникам через бэкенд
+          try {
+            const { data: processResult, error: processError } = await supabase.rpc('process_pending_diary_access', {
+              p_user_id: result.data.user.id
+            })
+            
+              if (!processError && processResult?.success_count > 0) {
+                console.log('[LoginPage] Обработано pending токенов:', processResult.success_count)
+                // Инвалидируем кэш для dashboard
+                await queryClient.invalidateQueries({ queryKey: ['dashboard-diaries'] })
+              }
+          } catch (error) {
+            console.error('[LoginPage] Ошибка обработки pending токенов:', error)
+          }
+          
+          // Перенаправление на главную страницу
+          navigate('/dashboard')
+        }
+      } catch (err: any) {
+        setError(translateError(err))
+      } finally {
+        setIsLoading(false)
+      }
+    } else {
+      // Вход по телефону (для сотрудников и клиентов) - через Supabase
+      try {
+        // Форматируем телефон в email формат (organization_employee-xxx@diary.local)
         let formattedPhone = data.login.trim().replace(/\s/g, '')
         if (!formattedPhone.startsWith('+')) {
           if (formattedPhone.startsWith('7')) {
@@ -135,49 +113,84 @@ export const LoginPage = () => {
             formattedPhone = '+7' + formattedPhone.replace(/\D/g, '')
           }
         }
-
-        // Ищем пользователя в localStorage
-        const users = JSON.parse(localStorage.getItem('local_users') || '[]')
-        const user = users.find((u: any) => u.phone === formattedPhone && u.password === data.password)
-
-        if (!user) {
-          setError('Неверный телефон или пароль')
-          setIsLoading(false)
-          return
+        
+        // Преобразуем телефон в email формат для Supabase
+        // Формат должен совпадать с форматом из Edge Function: organization_employee-xxx@diary.local
+        // В Edge Function: normalizePhone убирает все кроме цифр и плюса, затем buildPseudoEmail убирает все кроме цифр
+        const sanitizedPhone = formattedPhone.replace(/[^0-9]/g, '')
+        
+        console.log('LoginPage: Phone normalization:', {
+          original: data.login,
+          formatted: formattedPhone,
+          sanitized: sanitizedPhone,
+        })
+        
+        // Пробуем разные варианты формата (сотрудник, клиент организации, клиент сиделки)
+        const emailVariants = [
+          `organization_employee-${sanitizedPhone}@diary.local`,
+          `organization_client-${sanitizedPhone}@diary.local`,
+          `caregiver_client-${sanitizedPhone}@diary.local`,
+        ]
+        
+        console.log('LoginPage: Trying email variants:', emailVariants)
+        
+        let lastError: any = null
+        for (const email of emailVariants) {
+          try {
+            console.log('LoginPage: Attempting login with:', email)
+            const result = await supabase.auth.signInWithPassword({
+              email: email,
+              password: data.password,
+            })
+            
+            if (!result.error) {
+              // Успешный вход
+              if (result.data.user) {
+                console.log('LoginPage: ✅ Successfully logged in as:', result.data.user.email)
+                // Обновляем authStore
+                const { setUser, setSession } = useAuthStore.getState()
+                setUser(result.data.user)
+                setSession(result.data.session)
+                
+                // Обрабатываем pending токены доступа к дневникам через бэкенд
+                try {
+                  const { data: processResult, error: processError } = await supabase.rpc('process_pending_diary_access', {
+                    p_user_id: result.data.user.id
+                  })
+                  
+                  if (!processError && processResult?.success_count > 0) {
+                    console.log('[LoginPage] Обработано pending токенов:', processResult.success_count)
+                    // Инвалидируем кэш для dashboard, чтобы дневники появились
+                    await queryClient.invalidateQueries({ queryKey: ['dashboard-diaries'] })
+                  }
+                } catch (error) {
+                  console.error('[LoginPage] Ошибка обработки pending токенов:', error)
+                }
+                
+                // Перенаправление на главную страницу
+                navigate('/dashboard')
+                return
+              }
+            } else {
+              console.log('LoginPage: ❌ Login failed with', email, ':', result.error.message)
+              lastError = result.error
+            }
+          } catch (err: any) {
+            console.log('LoginPage: ❌ Exception with', email, ':', err.message)
+            lastError = err
+          }
         }
-
-        // Создаем сессию
-        const userData = {
-          id: user.id,
-          phone: user.phone,
-          user_role: user.user_role,
-          organization_id: user.organization_id,
-          employee_role: user.employee_role,
-          email_confirmed_at: user.email_confirmed_at,
+        
+        // Если ни один вариант не сработал, показываем ошибку
+        if (lastError) {
+          console.error('LoginPage: All login attempts failed, last error:', lastError)
+          throw lastError
         }
-
-        console.log('Logging in as employee:', userData.id, 'organization_id:', userData.organization_id)
-
-        // Сохраняем текущую сессию
-        localStorage.setItem('current_user', JSON.stringify(userData))
-        localStorage.setItem('auth_token', `token_${user.id}`)
-
-        // Обновляем authStore
-        const { setUser, setSession } = useAuthStore.getState()
-        setUser(userData as any)
-        setSession({
-          user: userData,
-          access_token: `token_${user.id}`,
-          refresh_token: `refresh_${user.id}`,
-        } as any)
-
-        // Перенаправление на главную страницу
-        navigate('/dashboard')
+      } catch (err: any) {
+        setError(translateError(err))
+      } finally {
         setIsLoading(false)
       }
-    } catch (err: any) {
-      setError(translateError(err))
-      setIsLoading(false)
     }
   }
 

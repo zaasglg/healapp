@@ -3,13 +3,11 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
+import { useQueryClient } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
 import { Button, Input } from '@/components/ui'
 import { useAuthStore } from '@/store/authStore'
-import {
-  ensureEmployeeInviteTokens,
-  updateEmployeeInviteToken,
-} from '@/utils/inviteStorage'
+// Убрано: импорты localStorage утилит (все через бэкенд)
 
 // Типы организаций
 type OrganizationType = 'pension' | 'patronage_agency' | 'caregiver'
@@ -62,13 +60,9 @@ const formatPhone = (raw: string) => {
   return value
 }
 
-const createEmployeeId = () =>
-  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `employee_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
-
 export const RegisterPage = () => {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [searchParams] = useSearchParams()
   const token = searchParams.get('token')
   const orgToken = searchParams.get('org_token')
@@ -100,8 +94,6 @@ export const RegisterPage = () => {
     isOrgInvite ? 'checking' : 'form'
   )
   const [orgInvite, setOrgInvite] = useState<any | null>(null)
-
-  const { setSession, setUser: setAuthUser } = useAuthStore()
 
   const {
     register,
@@ -143,34 +135,72 @@ export const RegisterPage = () => {
   }, [clientToken, hasInviteToken, token])
 
   useEffect(() => {
-    if (!isOrgInvite || clientToken) return
+    if (!isOrgInvite || clientToken || !orgToken) return
 
     setOrgInviteStatus('checking')
     setOrgInviteError(null)
 
-    try {
-      const tokens = ensureEmployeeInviteTokens()
-      const invite = tokens.find(item => String(item.token) === String(orgToken))
+    const validateInvite = async () => {
+      try {
+        // Проверяем токен через Supabase
+        const { data, error } = await supabase
+          .from('invite_tokens')
+          .select(`
+            id,
+            token,
+            invite_type,
+            expires_at,
+            used_at,
+            revoked_at,
+            organization_invite_tokens (
+              organization_id,
+              organization_type,
+              employee_role
+            )
+          `)
+          .eq('token', orgToken)
+          .eq('invite_type', 'organization_employee')
+          .is('revoked_at', null)
+          .single()
 
-      if (!invite) {
+        if (error || !data) {
         setOrgInviteStatus('invalid')
         setOrgInviteError('Пригласительная ссылка недействительна или была удалена.')
         return
       }
 
-      if (invite.used_at) {
+        if (data.used_at) {
         setOrgInviteStatus('invalid')
         setOrgInviteError('Эта пригласительная ссылка уже была использована.')
         return
       }
 
-      setOrgInvite(invite)
+        if (data.expires_at && new Date(data.expires_at) < new Date()) {
+          setOrgInviteStatus('invalid')
+          setOrgInviteError('Срок действия пригласительной ссылки истек.')
+          return
+        }
+
+        // organization_invite_tokens может быть массивом или объектом
+        const orgInviteData = Array.isArray(data.organization_invite_tokens)
+          ? data.organization_invite_tokens[0]
+          : data.organization_invite_tokens
+
+        setOrgInvite({
+          token: data.token,
+          organization_id: orgInviteData?.organization_id,
+          organization_type: orgInviteData?.organization_type,
+          role: orgInviteData?.employee_role,
+        })
       setOrgInviteStatus('form')
     } catch (err) {
       console.error('Ошибка проверки пригласительной ссылки сотрудника', err)
       setOrgInviteStatus('invalid')
       setOrgInviteError('Не удалось проверить пригласительную ссылку. Попробуйте позже.')
     }
+    }
+
+    validateInvite()
   }, [isOrgInvite, orgToken, clientToken])
 
   const onSubmit = async (data: RegisterFormData) => {
@@ -200,9 +230,61 @@ export const RegisterPage = () => {
       }
 
       if (authData.user) {
-        // TODO: Отметить токен как использованный в БД
-        // Перенаправление на страницу заполнения профиля
+        // Обновляем authStore с сессией (важно для RPC)
+        const { setUser, setSession } = useAuthStore.getState()
+        if (authData.session) {
+          setUser(authData.user)
+          setSession(authData.session)
+          // Устанавливаем сессию в Supabase клиенте для RPC
+          await supabase.auth.setSession({
+            access_token: authData.session.access_token,
+            refresh_token: authData.session.refresh_token,
+          })
+        }
+        
+        // Создаем запись в user_profiles через RPC (устанавливаем роль)
+        // Полная запись в organizations будет создана в ProfileSetupPage через create_organization
+        // Для сиделки тоже используется роль 'organization', так как она является организацией (частной)
+        try {
+          const role = 'organization' // И для организаций, и для сиделок используется роль 'organization'
+          const { error: profileError } = await supabase.rpc('create_user_profile', {
+            p_role: role,
+          })
+          
+          if (profileError) {
+            console.error('Ошибка создания user_profiles через RPC:', profileError)
+            // Продолжаем, это не критично - создастся в ProfileSetupPage
+          } else {
+            console.log('✅ user_profiles создан с ролью:', role)
+          }
+        } catch (profileErr) {
+          console.error('Ошибка создания user_profiles:', profileErr)
+        }
+        
+        // Проверяем, нужно ли подтверждение email
+        if (authData.user.email_confirmed_at) {
+          // Email уже подтвержден - обрабатываем pending токены
+          try {
+            const { data: processResult, error: processError } = await supabase.rpc('process_pending_diary_access', {
+              p_user_id: authData.user.id
+            })
+            
+            if (!processError && processResult?.success_count > 0) {
+              console.log('[RegisterPage] Обработано pending токенов:', processResult.success_count)
+              // Инвалидируем кэш для dashboard
+              await queryClient.invalidateQueries({ queryKey: ['dashboard-diaries'] })
+            }
+          } catch (error) {
+            console.error('[RegisterPage] Ошибка обработки pending токенов:', error)
+          }
+          
+          // Переходим к заполнению профиля
         navigate('/profile/setup')
+        } else {
+          // Email не подтвержден, переходим на страницу подтверждения
+          // Pending токены будут обработаны после подтверждения email
+          navigate(`/email-confirmation?email=${encodeURIComponent(authData.user.email || '')}`)
+        }
       }
     } catch (err: any) {
       setError(err.message || 'Ошибка при регистрации. Попробуйте ещё раз.')
@@ -225,70 +307,159 @@ export const RegisterPage = () => {
         return
       }
 
-      const usersRaw = localStorage.getItem('local_users')
-      const users = usersRaw ? JSON.parse(usersRaw) : []
-      if (users.some((user: any) => user.phone === phone)) {
-        setOrgInviteError('Пользователь с таким номером телефона уже зарегистрирован')
-        setIsLoading(false)
-        return
+      // Регистрация ТОЛЬКО через Edge Function accept-invite
+      // Edge Function создаст пользователя через admin API, обходя валидацию email
+      
+      // Используем прямой fetch для лучшей совместимости с CORS
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+      
+      // Определяем URL для Edge Function
+      // Для облачного Supabase: https://project.supabase.co/functions/v1/accept-invite
+      // Для локального Docker: через SUPABASE_URL/functions/v1/accept-invite
+      const baseUrl = supabaseUrl.replace(/\/$/, '') // Убираем trailing slash
+      const functionUrl = `${baseUrl}/functions/v1/accept-invite`
+      
+      console.log('Calling Edge Function:', functionUrl)
+      console.log('Supabase URL:', supabaseUrl)
+      
+      const response = await fetch(functionUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseAnonKey}`,
+          'apikey': supabaseAnonKey,
+        },
+        body: JSON.stringify({
+          token: orgToken,
+          password: data.password,
+          phone: phone,
+          firstName: '', // Заполняется в ProfileSetupPage
+          lastName: '', // Заполняется в ProfileSetupPage
+        }),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('Edge Function error:', response.status, errorText)
+        let errorMessage = 'Не удалось завершить регистрацию. Попробуйте ещё раз.'
+        try {
+          const errorJson = JSON.parse(errorText)
+          errorMessage = errorJson.message || errorJson.error || errorMessage
+        } catch {
+          errorMessage = errorText || errorMessage
+        }
+        throw new Error(errorMessage)
       }
 
-      const employeeId = createEmployeeId()
-      const now = new Date().toISOString()
-
-      const newUser = {
-        id: employeeId,
-        phone,
-        password: data.password,
-        user_role: 'org_employee',
-        organization_id: orgInvite.organization_id || null,
-        organization_type: orgInvite.organization_type || null,
-        employee_role: orgInvite.role || null,
-        organization_invite_token: orgToken,
-        created_at: now,
+      const inviteResult = await response.json()
+      
+      if (!inviteResult?.data?.session) {
+        throw new Error('Не удалось получить сессию после регистрации. Попробуйте войти вручную.')
       }
 
-      const nextUsers = [...users, newUser]
-      localStorage.setItem('local_users', JSON.stringify(nextUsers))
+      // Устанавливаем сессию в Supabase клиенте
+      const { error: sessionError } = await supabase.auth.setSession({
+        access_token: inviteResult.data.session.access_token,
+        refresh_token: inviteResult.data.session.refresh_token,
+      })
+      
+      console.log('Session set, sessionError:', sessionError)
 
-      const currentUserPayload = {
-        id: employeeId,
-        phone,
-        user_role: 'org_employee',
-        organization_id: orgInvite.organization_id || null,
-        organization_type: orgInvite.organization_type || null,
-        employee_role: orgInvite.role || null,
-        organization_invite_token: orgToken,
-        created_at: now,
+      if (sessionError) {
+        console.error('Ошибка установки сессии:', sessionError)
+        throw new Error('Не удалось установить сессию. Попробуйте войти вручную.')
       }
 
-      localStorage.setItem('current_user', JSON.stringify(currentUserPayload))
-      const authToken = `token_${employeeId}`
-      localStorage.setItem('auth_token', authToken)
+      // Получаем текущего пользователя и сессию
+      // ВАЖНО: Обновляем пользователя чтобы получить актуальные user_metadata из Edge Function
+      const { data: { user: currentUser }, error: userError } = await supabase.auth.getUser()
+      const { data: { session: currentSession } } = await supabase.auth.getSession()
 
-      const sessionPayload = {
-        user: currentUserPayload,
-        access_token: authToken,
-        refresh_token: `refresh_${employeeId}`,
+      if (userError || !currentUser) {
+        console.error('Ошибка получения пользователя:', userError)
+        throw new Error('Не удалось получить данные пользователя. Попробуйте войти вручную.')
+      }
+      
+      // Обновляем пользователя чтобы получить актуальные user_metadata
+      // Это нужно, чтобы user_metadata содержал role и organization_id из Edge Function
+      const { data: { user: refreshedUser } } = await supabase.auth.getUser()
+      const finalUser = refreshedUser || currentUser
+      
+      console.log('RegisterPage: User metadata after registration:', {
+        role: finalUser.user_metadata?.role,
+        user_role: finalUser.user_metadata?.user_role,
+        organization_id: finalUser.user_metadata?.organization_id,
+      })
+
+      // Обновляем authStore напрямую (не через checkAuth, чтобы избежать race condition)
+      const { setUser, setSession, setLoading } = useAuthStore.getState()
+      if (currentSession && finalUser) {
+        console.log('RegisterPage: Setting auth state directly:', {
+          userId: finalUser.id,
+          email: finalUser.email,
+          role: finalUser.user_metadata?.role,
+          user_role: finalUser.user_metadata?.user_role,
+          organization_id: finalUser.user_metadata?.organization_id,
+          hasSession: !!currentSession,
+        })
+        
+        // Устанавливаем состояние напрямую, чтобы избежать проверки localStorage
+        // setSession уже устанавливает isAuthenticated, но убедимся
+        setUser(finalUser)
+        setSession(currentSession)
+        setLoading(false)
+        
+        // Дополнительно убеждаемся, что isAuthenticated установлен
+        useAuthStore.setState({ 
+          isAuthenticated: true,
+          loading: false,
+        })
+        
+        console.log('RegisterPage: Auth state set, isAuthenticated:', useAuthStore.getState().isAuthenticated)
+      } else {
+        console.error('RegisterPage: Missing session or user:', {
+          hasSession: !!currentSession,
+          hasUser: !!finalUser,
+        })
       }
 
-      setSession(sessionPayload as any)
-      setAuthUser(currentUserPayload as any)
+      console.log('✅ Регистрация сотрудника завершена успешно')
+      console.log('Final auth state:', {
+        isAuthenticated: useAuthStore.getState().isAuthenticated,
+        hasUser: !!useAuthStore.getState().user,
+        hasSession: !!useAuthStore.getState().session,
+        userRole: useAuthStore.getState().user?.user_metadata?.role,
+        userRoleAlt: useAuthStore.getState().user?.user_metadata?.user_role,
+        organizationId: useAuthStore.getState().user?.user_metadata?.organization_id,
+      })
+      
+      // Небольшая задержка перед навигацией, чтобы состояние точно обновилось
+      await new Promise(resolve => setTimeout(resolve, 200))
 
-      try {
-        updateEmployeeInviteToken(orgToken, invite => ({
-          ...invite,
-          used_at: now,
-          used_by: employeeId,
-        }))
-      } catch (updateError) {
-        console.warn('Не удалось отметить токен как использованный', updateError)
+      // Обрабатываем pending токены доступа к дневникам через бэкенд
+      if (authData.user?.id) {
+        try {
+          const { data: processResult, error: processError } = await supabase.rpc('process_pending_diary_access', {
+            p_user_id: authData.user.id
+          })
+          
+          if (!processError && processResult?.success_count > 0) {
+            console.log('[RegisterPage] Обработано pending токенов:', processResult.success_count)
+            // Инвалидируем кэш для dashboard
+            const { queryClient } = await import('@tanstack/react-query')
+            const queryClientInstance = queryClient.getQueryClient()
+            await queryClientInstance.invalidateQueries({ queryKey: ['dashboard-diaries'] })
+          }
+        } catch (error) {
+          console.error('[RegisterPage] Ошибка обработки pending токенов:', error)
+        }
       }
 
       navigate('/profile/setup')
-    } catch (err) {
+    } catch (err: any) {
       console.error('Ошибка регистрации по приглашению организации', err)
-      setOrgInviteError('Не удалось завершить регистрацию. Попробуйте ещё раз.')
+      setOrgInviteError(err.message || 'Не удалось завершить регистрацию. Попробуйте ещё раз.')
     } finally {
       setIsLoading(false)
     }

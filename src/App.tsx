@@ -1,3 +1,4 @@
+// Тестовый деплой - проверка автоматического деплоя
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { MainLayout, AuthLayout, SimpleLayout } from '@/components/layout'
 import { ProtectedRoute } from '@/components/ProtectedRoute'

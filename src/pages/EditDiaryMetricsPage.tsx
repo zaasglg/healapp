@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
 import { Button, Input, Modal } from '@/components/ui'
+import { supabase } from '@/lib/supabase'
 
 interface DiaryMetric {
   id: string
@@ -85,6 +86,7 @@ export const EditDiaryMetricsPage = () => {
     const userRole = currentUser.user_role || user.user_metadata?.user_role
     const organizationType = currentUser.organization_type || user.user_metadata?.organization_type
 
+    // Клиенты и организации могут редактировать показатели
     // Частные сиделки НЕ могут редактировать показатели
     if (organizationType === 'caregiver') {
       alert('У вас нет прав на редактирование показателей дневника')
@@ -99,20 +101,87 @@ export const EditDiaryMetricsPage = () => {
       return
     }
 
-    // Загружаем текущие показатели дневника
-    const allMetrics = JSON.parse(localStorage.getItem('diary_metrics') || '[]') as DiaryMetric[]
-    const diaryMetrics = allMetrics.filter(m => m.diary_id === id)
+    // Клиенты и организации (pension, patronage_agency) могут редактировать показатели
 
-    const storedCustomMetrics = JSON.parse(localStorage.getItem('diary_custom_metrics') || '[]') as CustomMetric[]
-    const diaryCustomMetrics = storedCustomMetrics.filter(metric => metric.diary_id === id)
+    // Загружаем текущие показатели дневника из Supabase
+    const loadMetrics = async () => {
+      if (!id) return
 
-    // Разделяем на закрепленные и все остальные
-    const pinned = diaryMetrics.filter(m => m.is_pinned).map(m => m.metric_type)
-    const all = diaryMetrics.filter(m => !m.is_pinned).map(m => m.metric_type)
+      try {
+        // Загружаем метрики из таблицы diary_metrics
+        const { data: metricsData, error: metricsError } = await supabase
+          .from('diary_metrics')
+          .select('id, metric_key, is_pinned, metadata')
+          .eq('diary_id', id)
 
-    setSelectedPinned(pinned)
-    setSelectedAll(all)
-    setCustomMetrics(diaryCustomMetrics)
+        if (metricsError) {
+          console.error('Ошибка загрузки метрик:', metricsError)
+          // Fallback на пустые значения
+          setSelectedPinned([])
+          setSelectedAll([])
+          setCustomMetrics([])
+          return
+        }
+
+        if (!metricsData || metricsData.length === 0) {
+          // Нет метрик - используем пустые значения
+          setSelectedPinned([])
+          setSelectedAll([])
+          setCustomMetrics([])
+          return
+        }
+
+        // Разделяем на закрепленные и все остальные
+        const pinned: string[] = []
+        const all: string[] = []
+        const custom: CustomMetric[] = []
+
+        metricsData.forEach(metric => {
+          const metricKey = metric.metric_key
+          
+          // Проверяем, является ли метрика пользовательской (начинается с 'custom_' или хранится в metadata)
+          const isCustom = metricKey.startsWith('custom_') || 
+                          (metric.metadata && typeof metric.metadata === 'object' && 'is_custom' in metric.metadata)
+          
+          if (isCustom) {
+            // Пользовательская метрика
+            const label = (metric.metadata as any)?.label || metricKey.replace('custom_', '')
+            const category = (metric.metadata as any)?.category || 'care'
+            custom.push({
+              id: metricKey,
+              diary_id: id,
+              label,
+              category,
+            })
+            
+            if (metric.is_pinned) {
+              pinned.push(metricKey)
+            } else {
+              all.push(metricKey)
+            }
+          } else {
+            // Стандартная метрика
+            if (metric.is_pinned) {
+              pinned.push(metricKey)
+            } else {
+              all.push(metricKey)
+            }
+          }
+        })
+
+        setSelectedPinned(pinned)
+        setSelectedAll(all)
+        setCustomMetrics(custom)
+      } catch (error) {
+        console.error('Ошибка загрузки метрик:', error)
+        // Fallback на пустые значения
+        setSelectedPinned([])
+        setSelectedAll([])
+        setCustomMetrics([])
+      }
+    }
+
+    loadMetrics()
   }, [id, user, navigate])
 
   const handlePinnedToggle = (metricValue: string) => {
@@ -154,46 +223,170 @@ export const EditDiaryMetricsPage = () => {
     setNewCustomMetric('')
   }
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    if (!id) return
+
     if (selectedPinned.length === 0 && selectedAll.length === 0) {
       alert('Необходимо выбрать хотя бы один показатель')
       return
     }
 
-    // Получаем текущие метрики
-    const allMetrics = JSON.parse(localStorage.getItem('diary_metrics') || '[]') as DiaryMetric[]
-    
-    // Удаляем старые метрики этого дневника
-    const otherMetrics = allMetrics.filter(m => m.diary_id !== id)
-    
-    // Создаем новые метрики
-    const newMetrics: DiaryMetric[] = [
-      ...selectedPinned.map(type => ({
-        id: crypto.randomUUID(),
-        diary_id: id!,
-        metric_type: type,
-        is_pinned: true,
-      })),
-      ...selectedAll.map(type => ({
-        id: crypto.randomUUID(),
-        diary_id: id!,
-        metric_type: type,
-        is_pinned: false,
-      })),
-    ]
+    try {
+      // Загружаем существующие метрики из Supabase
+      const { data: existingMetricsData, error: loadError } = await supabase
+        .from('diary_metrics')
+        .select('*')
+        .eq('diary_id', id)
 
-    // Сохраняем пользовательские показатели
-    const storedCustomMetrics = JSON.parse(localStorage.getItem('diary_custom_metrics') || '[]') as CustomMetric[]
-    const otherCustomMetrics = storedCustomMetrics.filter(metric => metric.diary_id !== id)
-    const activeMetricIds = new Set(newMetrics.map(metric => metric.metric_type))
-    const activeCustomMetrics = customMetrics.filter(metric => activeMetricIds.has(metric.id))
-    localStorage.setItem('diary_custom_metrics', JSON.stringify([...otherCustomMetrics, ...activeCustomMetrics]))
+      if (loadError) {
+        console.error('Ошибка загрузки метрик:', loadError)
+        alert('Не удалось загрузить показатели. Попробуйте позже.')
+        return
+      }
 
-    // Сохраняем обновленные метрики
-    localStorage.setItem('diary_metrics', JSON.stringify([...otherMetrics, ...newMetrics]))
+      // Создаем карту существующих метрик по metric_key
+      const existingSupabaseMap = new Map(
+        (existingMetricsData || []).map((m: any) => [m.metric_key, m])
+      )
 
-    alert('Показатели успешно обновлены')
-    navigate(`/diaries/${id}`)
+      // Объединяем все выбранные метрики (закрепленные + остальные)
+      const allSelectedMetrics = Array.from(new Set([...selectedPinned, ...selectedAll]))
+
+      // Подготавливаем метрики для upsert (обновление или вставка)
+      const metricsToUpsert: Array<{
+        id?: string
+        diary_id: string
+        metric_key: string
+        is_pinned: boolean
+        metadata?: any
+      }> = []
+
+      // Обрабатываем закрепленные метрики
+      selectedPinned.forEach(metricKey => {
+        const existing = existingSupabaseMap.get(metricKey)
+        const customMetric = customMetrics.find(m => m.id === metricKey)
+        
+        metricsToUpsert.push({
+          id: existing?.id, // Если есть существующая запись, используем её id для обновления
+          diary_id: id,
+          metric_key: metricKey,
+          is_pinned: true,
+          metadata: customMetric
+            ? {
+                label: customMetric.label,
+                category: customMetric.category,
+                is_custom: true,
+                // Сохраняем существующие настройки, если они есть
+                ...(existing?.metadata && typeof existing.metadata === 'object' 
+                  ? { settings: existing.metadata.settings } 
+                  : {}),
+              }
+            : existing?.metadata || {}, // Сохраняем существующие метаданные для стандартных метрик
+        })
+      })
+
+      // Обрабатываем незакрепленные метрики
+      selectedAll.forEach(metricKey => {
+        const existing = existingSupabaseMap.get(metricKey)
+        const customMetric = customMetrics.find(m => m.id === metricKey)
+        
+        metricsToUpsert.push({
+          id: existing?.id, // Если есть существующая запись, используем её id для обновления
+          diary_id: id,
+          metric_key: metricKey,
+          is_pinned: false,
+          metadata: customMetric
+            ? {
+                label: customMetric.label,
+                category: customMetric.category,
+                is_custom: true,
+                // Сохраняем существующие настройки, если они есть
+                ...(existing?.metadata && typeof existing.metadata === 'object' 
+                  ? { settings: existing.metadata.settings } 
+                  : {}),
+              }
+            : existing?.metadata || {}, // Сохраняем существующие метаданные для стандартных метрик
+        })
+      })
+
+      // Определяем метрики для удаления (те, которые были, но не выбраны)
+      const metricsToDelete = Array.from(existingSupabaseMap.keys()).filter(
+        key => !allSelectedMetrics.includes(key)
+      )
+
+      // Удаляем метрики, которые больше не выбраны
+      if (metricsToDelete.length > 0) {
+        const { error: deleteError } = await supabase
+          .from('diary_metrics')
+          .delete()
+          .eq('diary_id', id)
+          .in('metric_key', metricsToDelete)
+
+        if (deleteError) {
+          console.error('Ошибка удаления метрик:', deleteError)
+          // Продолжаем выполнение, даже если удаление не удалось
+        }
+      }
+
+      // Выполняем upsert для всех метрик (обновление существующих или вставка новых)
+      if (metricsToUpsert.length > 0) {
+        // Используем подход из DiaryPage: обновляем существующие по id, вставляем новые без id
+        const upsertPromises = metricsToUpsert.map(async (metric) => {
+          if (metric.id) {
+            // Обновляем существующую метрику
+            const { error: updateError } = await supabase
+              .from('diary_metrics')
+              .update({
+                is_pinned: metric.is_pinned,
+                metadata: metric.metadata || {},
+              })
+              .eq('id', metric.id)
+
+            if (updateError) {
+              console.error('Ошибка обновления метрики:', updateError)
+              throw updateError
+            }
+          } else {
+            // Создаем новую метрику
+            const { error: insertError } = await supabase
+              .from('diary_metrics')
+              .insert({
+                diary_id: metric.diary_id,
+                metric_key: metric.metric_key,
+                is_pinned: metric.is_pinned,
+                metadata: metric.metadata || {},
+              })
+
+            if (insertError) {
+              console.error('Ошибка создания метрики:', insertError)
+              throw insertError
+            }
+          }
+        })
+
+        try {
+          await Promise.all(upsertPromises)
+        } catch (error: any) {
+          console.error('Ошибка сохранения метрик:', error)
+          // Если ошибка связана с правами доступа, показываем более понятное сообщение
+          if (error?.code === '42501' || error?.message?.includes('permission') || error?.message?.includes('policy')) {
+            alert('У вас нет прав на редактирование показателей этого дневника. Обратитесь к владельцу для получения доступа.')
+          } else {
+            alert('Ошибка при сохранении показателей. Попробуйте позже.')
+          }
+          return
+        }
+      }
+
+      alert('Показатели успешно обновлены')
+      // Небольшая задержка перед редиректом, чтобы пользователь увидел сообщение
+      setTimeout(() => {
+        navigate(`/diaries/${id}`)
+      }, 500)
+    } catch (error) {
+      console.error('Ошибка сохранения метрик:', error)
+      alert('Ошибка при сохранении показателей. Попробуйте позже.')
+    }
   }
 
   const getMetricLabel = (value: string) => {

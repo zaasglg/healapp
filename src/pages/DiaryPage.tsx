@@ -1,16 +1,13 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import type { TouchEvent } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '@/store/authStore'
 import { supabase } from '@/lib/supabase'
 import { Button, Input } from '@/components/ui'
 import { PinnedMetricPanel } from '@/components/PinnedMetricPanel'
 import type { MetricFillData } from '@/components/MetricFillModal'
-import {
-  normalizeClientLink,
-  type DiaryClientLink,
-  attachClientToDiary,
-} from '@/utils/diaryClientLink'
+import type { DiaryClientLink } from '@/utils/diaryClientLink'
 
 interface PatientCard {
   id: string
@@ -42,6 +39,11 @@ interface DiaryMetric {
   metric_type: string
   is_pinned: boolean
   settings?: MetricSettings
+  metadata?: {
+    label?: string
+    category?: string
+    [key: string]: any
+  }
 }
 
 interface DiaryMetricValue {
@@ -174,11 +176,28 @@ const mergeDiaryEntries = (entries: any[]): DiaryMetricValue[] => {
   entries.forEach(rawEntry => {
     const normalized = normalizeDiaryMetricValue(rawEntry)
     if (!normalized) return
-    map.set(normalized.id, normalized)
+    
+    // Нормализуем значение для сравнения
+    const valueStr = typeof normalized.value === 'object' 
+      ? JSON.stringify(normalized.value) 
+      : String(normalized.value ?? '')
+    
+    // Нормализуем время для сравнения (округляем до секунды, чтобы избежать проблем с миллисекундами)
+    const timeStr = new Date(normalized.created_at).toISOString().slice(0, 19) + 'Z'
+    
+    // Используем комбинацию metric_type, value и времени для уникальности (БЕЗ id)
+    // Это позволяет дедуплицировать записи из разных источников (diary_metric_values и diary_history)
+    const uniqueKey = `${normalized.metric_type}_${valueStr}_${timeStr}`
+    
+    // Если запись с таким ключом уже есть, пропускаем (дедупликация)
+    // Оставляем запись с более ранним ID (первая встреченная)
+    if (!map.has(uniqueKey)) {
+      map.set(uniqueKey, normalized)
+    }
   })
 
   return Array.from(map.values()).sort(
-    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
   )
 }
 
@@ -193,46 +212,35 @@ const loadDiaryHistoryEntries = async (diaryId: string, date?: string): Promise<
 
     if (error) {
       console.error('Ошибка загрузки истории:', error)
-      // Fallback на localStorage если RPC не работает
-      const storage = JSON.parse(localStorage.getItem('diary_history') || '{}')
-      if (!storage || typeof storage !== 'object') return []
-      const rawEntries = storage[diaryId] || []
-      return mergeDiaryEntries(rawEntries)
+      return []
     }
 
     // Преобразуем данные из Supabase в формат DiaryMetricValue
+    // Функция возвращает: event_type, payload, recorded_by, occurred_at
     return (data || []).map((item: any) => {
       const payload = item.payload || {}
+      
+      // Извлекаем значение из payload (может быть объектом { value: ... } или просто значением)
+      let extractedValue = payload.value
+      if (payload.value && typeof payload.value === 'object' && 'value' in payload.value) {
+        extractedValue = payload.value.value
+      }
+      
       return {
         id: payload.metric_id || `value_${Date.now()}_${Math.random()}`,
         diary_id: diaryId,
         metric_type: payload.metric_key || '',
-        value: payload.value || null,
+        value: extractedValue || null,
         created_at: item.occurred_at || new Date().toISOString(),
       }
     })
   } catch (error) {
     console.error('Ошибка загрузки истории:', error)
-    // Fallback на localStorage
-    const storage = JSON.parse(localStorage.getItem('diary_history') || '{}')
-    if (!storage || typeof storage !== 'object') return []
-    const rawEntries = storage[diaryId] || []
-    return mergeDiaryEntries(rawEntries)
+    return []
   }
 }
 
-const persistDiaryHistoryEntries = (diaryId: string, entries: DiaryMetricValue[]) => {
-  try {
-    const storage = JSON.parse(localStorage.getItem('diary_history') || '{}')
-    const nextStorage = {
-      ...(storage && typeof storage === 'object' ? storage : {}),
-      [diaryId]: entries,
-    }
-    localStorage.setItem('diary_history', JSON.stringify(nextStorage))
-  } catch (error) {
-    console.warn('Не удалось сохранить историю дневника', error)
-  }
-}
+// persistDiaryHistoryEntries больше не нужна - сохранение идет через RPC save_metric_value
 
 type MetricModalVariant = 'boolean' | 'numeric' | 'pressure' | 'pain' | 'urination' | 'options' | 'text'
 
@@ -816,6 +824,7 @@ const MetricValueModal = ({ isOpen, metricType, metricLabel, onClose, onSave }: 
 export const DiaryPage = () => {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const { user } = useAuthStore()
   const [searchParams] = useSearchParams()
   const appOrigin = typeof window !== 'undefined' ? window.location.origin : ''
@@ -846,7 +855,36 @@ export const DiaryPage = () => {
     }
   }, [])
 
-  const userRole = currentUser.user_role || user?.user_metadata?.user_role
+  // Загружаем роль из user_profiles, если не найдена в metadata
+  const [userRole, setUserRole] = useState<string | null>(
+    currentUser.user_role || user?.user_metadata?.user_role || null
+  )
+  
+  // Загружаем роль из user_profiles, если не определена
+  useEffect(() => {
+    const loadUserRole = async () => {
+      if (!userRole && user?.id) {
+        try {
+          const { data, error } = await supabase
+            .from('user_profiles')
+            .select('role')
+            .eq('user_id', user.id)
+            .single()
+          
+          if (!error && data?.role) {
+            console.log('[DiaryPage] Загружена роль из user_profiles:', data.role)
+            setUserRole(data.role)
+          } else if (error) {
+            console.error('[DiaryPage] Ошибка загрузки роли из user_profiles:', error)
+          }
+        } catch (err) {
+          console.error('Ошибка загрузки роли из user_profiles:', err)
+        }
+      }
+    }
+    
+    loadUserRole()
+  }, [user?.id, userRole])
   const organizationType =
     currentUser.organization_type || user?.user_metadata?.organization_type
   const isOrganization =
@@ -882,7 +920,6 @@ export const DiaryPage = () => {
       (user as any)?.caregiver_id
   )
   const effectiveOrganizationId = userOrganizationId || (isOrganizationAccount ? userId : null)
-  const effectiveCaregiverId = userCaregiverId || (isCaregiver ? userId : null)
 
   const defaultHistoryDate = useMemo(() => toInputDate(new Date()), [])
 
@@ -896,6 +933,7 @@ export const DiaryPage = () => {
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({})
   const [panelMetric, setPanelMetric] = useState<string | null>(null)
   const [panelVisible, setPanelVisible] = useState(false)
+  const [caregiverOrganizationId, setCaregiverOrganizationId] = useState<string | null>(null)
   const [animatingPinnedMetric, setAnimatingPinnedMetric] = useState<{ type: string; index: number; direction: 'toPanel' | 'fromPanel' } | null>(null)
   const [panelOriginIndex, setPanelOriginIndex] = useState<number | null>(null)
   const [metricSettings, setMetricSettings] = useState<Record<string, MetricSettings>>({})
@@ -908,7 +946,15 @@ export const DiaryPage = () => {
   const calendarRef = useRef<HTMLDivElement | null>(null)
   const [organizationClientLink, setOrganizationClientLink] = useState<DiaryClientLink | null>(null)
   const [attachedClient, setAttachedClient] = useState<ClientProfile | null>(null)
-  const [externalAccessLinks, setExternalAccessLinks] = useState<Array<{ id: string; link: string; created_at: string }>>([])
+  const [externalAccessLinks, setExternalAccessLinks] = useState<Array<{ 
+    id: string
+    token: string
+    link?: string
+    invited_email?: string | null
+    invited_phone?: string | null
+    expires_at?: string | null
+    created_at: string
+  }>>([])
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [settingsSection, setSettingsSection] = useState<'card' | 'metrics' | 'access'>('card')
   const assignmentOrganizationType = useMemo(
@@ -936,22 +982,55 @@ export const DiaryPage = () => {
   const [availableOrgEmployees, setAvailableOrgEmployees] = useState<
     Array<{ user_id: string; first_name?: string; last_name?: string; role?: string; organization_type?: OrganizationType | null }>
   >([])
+  const [invitedClients, setInvitedClients] = useState<
+    Array<{
+      invite_id: string
+      token: string
+      client_id: string | null
+      invited_client_phone: string | null
+      invited_client_name: string | null
+      used_at: string | null
+      used_by: string | null
+      accepted_at: string | null
+      accepted_by: string | null
+      created_at: string
+      registered_client_name?: string
+      registered_client_phone?: string
+      registered_client_user_id?: string
+    }>
+  >([])
+  const [organizationInfo, setOrganizationInfo] = useState<{ id: string; name: string; type: string | null } | null>(null)
   const [assignedEmployees, setAssignedEmployees] = useState<
-    Array<{ user_id: string; first_name?: string; last_name?: string; role?: string; organization_type?: OrganizationType | null }>
+    Array<{ user_id: string; first_name?: string; last_name?: string; role?: string; organization_type?: OrganizationType | null; revoked_at?: string | null }>
   >([])
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>('')
   const [assignmentsLoaded, setAssignmentsLoaded] = useState(false)
-  const updateAttachedClientInfo = (link: DiaryClientLink | null) => {
+  const updateAttachedClientInfo = async (link: DiaryClientLink | null) => {
     if (!link?.accepted_by) {
       setAttachedClient(null)
       return
     }
+    
+    // Загружаем клиента из Supabase
     try {
-      const clients = JSON.parse(localStorage.getItem('local_clients') || '[]')
-      const clientData = clients.find(
-        (client: any) => String(client.user_id) === String(link.accepted_by)
-      )
-      setAttachedClient(clientData || null)
+      const { data: clientData, error: clientError } = await supabase
+        .from('clients')
+        .select('*')
+        .eq('user_id', link.accepted_by)
+        .maybeSingle()
+
+      if (clientError) {
+        console.warn('Ошибка загрузки клиента:', clientError)
+        setAttachedClient(null)
+      } else if (clientData) {
+        setAttachedClient({
+          user_id: clientData.user_id,
+          first_name: clientData.first_name || '',
+          last_name: clientData.last_name || '',
+        })
+      } else {
+        setAttachedClient(null)
+      }
     } catch (error) {
       console.warn('Не удалось загрузить данные клиента', error)
       setAttachedClient(null)
@@ -966,59 +1045,584 @@ export const DiaryPage = () => {
     return () => clearInterval(interval)
   }, [])
 
+  // Загрузка ID организации-сиделки из таблицы organizations
+  useEffect(() => {
+    if (!isCaregiver || !userId) return
+
+    const loadCaregiverOrganizationId = async () => {
+      try {
+        const { data: orgData, error: orgError } = await supabase
+          .from('organizations')
+          .select('id')
+          .eq('user_id', userId)
+          .eq('organization_type', 'caregiver')
+          .maybeSingle()
+
+        if (!orgError && orgData) {
+          console.log('[DiaryPage] Загружен ID организации-сиделки:', orgData.id)
+          setCaregiverOrganizationId(orgData.id)
+        } else if (orgError) {
+          console.error('[DiaryPage] Ошибка загрузки ID организации-сиделки:', orgError)
+        }
+      } catch (error) {
+        console.error('[DiaryPage] Ошибка загрузки ID организации-сиделки:', error)
+      }
+    }
+
+    loadCaregiverOrganizationId()
+  }, [isCaregiver, userId])
+
+  // ВАЖНО: Для сиделки используем caregiverOrganizationId (id из organizations), а не userId
+  // Определяем здесь, чтобы использовать в accessState useMemo ниже
+  const effectiveCaregiverId = useMemo(() => {
+    return userCaregiverId || (isCaregiver ? caregiverOrganizationId : null)
+  }, [userCaregiverId, isCaregiver, caregiverOrganizationId])
+
+  // Загрузка ссылок для клиентов из Supabase
   useEffect(() => {
     if (!id) return
-    const rawOrgLinks = localStorage.getItem('diary_client_links')
-    if (rawOrgLinks) {
+
+    const loadClientLinks = async () => {
       try {
-        const parsed = JSON.parse(rawOrgLinks)
-        if (parsed && parsed[id]) {
-          const normalized = normalizeClientLink(parsed[id], {
-            diaryId: id,
-            patientCardId: diary?.patient_card_id ?? null,
-            organizationId: diary?.organization_id ?? effectiveOrganizationId ?? null,
-          })
-          if (normalized) {
-            setOrganizationClientLink(normalized)
-            updateAttachedClientInfo(normalized)
-            if (
-              !parsed[id].token ||
-              parsed[id].token !== normalized.token ||
-              parsed[id].accepted_by !== normalized.accepted_by ||
-              parsed[id].accepted_at !== normalized.accepted_at ||
-              parsed[id].diary_id !== normalized.diary_id
-            ) {
-              const updated = { ...parsed, [id]: normalized }
-              localStorage.setItem('diary_client_links', JSON.stringify(updated))
-            }
-          } else {
-            setOrganizationClientLink(null)
-            setAttachedClient(null)
+        // Загружаем ссылку для клиента из таблицы diary_client_links
+        const { data: clientLink, error: linkError } = await supabase
+          .from('diary_client_links')
+          .select('*')
+          .eq('diary_id', id)
+          .maybeSingle()
+
+        if (linkError) {
+          console.error('Ошибка загрузки ссылки для клиента:', linkError)
+          setOrganizationClientLink(null)
+          setAttachedClient(null)
+          return
+        }
+
+        if (clientLink) {
+          // Преобразуем данные из БД в формат DiaryClientLink
+          const link = clientLink.token 
+            ? `${appOrigin}/client-invite?diary=${id}&token=${clientLink.token}`
+            : ''
+          const normalized: DiaryClientLink = {
+            link,
+            created_at: clientLink.accepted_at || new Date().toISOString(),
+            token: clientLink.token || '',
+            diary_id: clientLink.diary_id,
+            patient_card_id: diary?.patient_card_id ?? null,
+            organization_id: diary?.organization_id ?? effectiveOrganizationId ?? null,
+            accepted_by: clientLink.accepted_by || null,
+            accepted_at: clientLink.accepted_at || null,
+            client_id: clientLink.client_id || null,
           }
+
+          setOrganizationClientLink(normalized)
+          updateAttachedClientInfo(normalized)
         } else {
           setOrganizationClientLink(null)
           setAttachedClient(null)
         }
       } catch (error) {
-        console.warn('Не удалось прочитать diary_client_links', error)
+        console.error('Ошибка загрузки ссылки для клиента:', error)
+        setOrganizationClientLink(null)
+        setAttachedClient(null)
       }
-    } else {
-      setOrganizationClientLink(null)
-      setAttachedClient(null)
     }
 
-    const rawExternalLinks = localStorage.getItem('diary_external_access_links')
-    if (rawExternalLinks) {
+    loadClientLinks()
+  }, [id, diary?.patient_card_id, diary?.organization_id, effectiveOrganizationId])
+
+  // Загрузка приглашенных клиентов
+  useEffect(() => {
+    console.log('[DiaryPage] useEffect для загрузки клиентов:', { id, isOrganization, organizationType, userRole })
+    // Загружаем для всех организаций (не только для аккаунтов организаций, но и для сотрудников, которые могут видеть вкладку)
+    if (!id) {
+      console.log('[DiaryPage] Пропуск загрузки клиентов: нет id')
+      return
+    }
+    if (!isOrganization) {
+      console.log('[DiaryPage] Пропуск загрузки клиентов: не организация', { isOrganization, organizationType })
+      return
+    }
+
+    const loadInvitedClients = async () => {
       try {
-        const parsed = JSON.parse(rawExternalLinks)
-        if (Array.isArray(parsed[id])) {
-          setExternalAccessLinks(parsed[id])
+        console.log('[DiaryPage] Загрузка приглашенных клиентов для дневника:', id, 'organization_id:', effectiveOrganizationId)
+        
+        // Сначала загружаем diary_client_links напрямую - это основной источник данных
+        const { data: clientLinks, error: linksError } = await supabase
+          .from('diary_client_links')
+          .select('token, accepted_at, client_id, accepted_by')
+          .eq('diary_id', id)
+
+        console.log('[DiaryPage] Загружено diary_client_links:', clientLinks?.length || 0, 'Ошибка:', linksError)
+
+        // Загружаем приглашения клиентов для этого дневника
+        // ВАЖНО: загружаем used_by для определения зарегистрированных клиентов
+        const { data: inviteTokens, error: inviteError } = await supabase
+          .from('invite_tokens')
+          .select(`
+            id,
+            token,
+            used_at,
+            used_by,
+            revoked_at,
+            created_at,
+            organization_client_invite_tokens (
+              invite_id,
+              diary_id,
+              organization_id,
+              invited_client_phone,
+              invited_client_name,
+              metadata
+            )
+          `)
+          .eq('invite_type', 'organization_client')
+          .order('created_at', { ascending: false })
+        
+        console.log('[DiaryPage] Загружено приглашений:', inviteTokens?.length || 0, 'Ошибка:', inviteError)
+        if (inviteTokens && inviteTokens.length > 0) {
+          console.log('[DiaryPage] Детали загруженных приглашений:', inviteTokens.map((it: any) => ({
+            token: it.token,
+            used_at: it.used_at,
+            used_by: it.used_by,
+            invite_type: it.invite_type,
+          })))
+        }
+
+        // Не прерываем выполнение, если есть ошибка загрузки invite_tokens
+        // Основной источник данных - diary_client_links
+
+        // УДАЛЕНО: Старая логика фильтрации filteredInvites больше не используется
+        // Теперь используем inviteTokensMap напрямую
+
+        // Создаем карту токенов из diary_client_links для быстрого поиска
+        const linksMap = new Map<string, { accepted_at: string | null; client_id: string | null; accepted_by: string | null }>()
+        if (!linksError && clientLinks && clientLinks.length > 0) {
+          clientLinks.forEach((link: any) => {
+            linksMap.set(link.token, {
+              accepted_at: link.accepted_at,
+              client_id: link.client_id,
+              accepted_by: link.accepted_by,
+            })
+            console.log('[DiaryPage] Добавлена ссылка в карту:', {
+              token: link.token,
+              client_id: link.client_id,
+              accepted_at: link.accepted_at,
+              accepted_by: link.accepted_by,
+            })
+          })
+          console.log('[DiaryPage] Создана карта токенов из diary_client_links:', linksMap.size)
+        }
+
+        // Объявляем clientsData заранее, чтобы данные восстановленных клиентов сохранялись
+        let clientsData: Record<string, { first_name?: string; last_name?: string; user_id?: string; phone?: string }> = {}
+        
+        // Создаем карту invite_tokens по токену для быстрого поиска
+        const inviteTokensMap = new Map<string, any>()
+        const usedByUserIds = new Set<string>() // Собираем user_id из used_by для восстановления данных
+        if (!inviteError && inviteTokens && inviteTokens.length > 0) {
+          inviteTokens.forEach((invite: any) => {
+            const clientInviteData = Array.isArray(invite.organization_client_invite_tokens)
+              ? invite.organization_client_invite_tokens.find((ci: any) => ci.diary_id === id)
+              : invite.organization_client_invite_tokens?.diary_id === id
+              ? invite.organization_client_invite_tokens
+              : null
+            
+            if (clientInviteData) {
+              // ВАЖНО: Если приглашение связано с текущим дневником (diary_id совпадает),
+              // то показываем его независимо от organization_id
+              // Это нужно, потому что дневник может быть создан одной организацией,
+              // а приглашение - другой (или сотрудником)
+              const isForCurrentDiary = clientInviteData.diary_id === id
+              
+              // Проверяем organization_id только если приглашение НЕ для текущего дневника
+              // ИЛИ если organization_id совпадает
+              const orgMatches = !effectiveOrganizationId || 
+                !clientInviteData.organization_id || 
+                clientInviteData.organization_id === effectiveOrganizationId
+              
+              if (isForCurrentDiary || orgMatches) {
+                inviteTokensMap.set(invite.token, {
+                  invite_id: invite.id,
+                  used_at: invite.used_at,
+                  used_by: invite.used_by, // Добавляем used_by для восстановления данных
+                  created_at: invite.created_at,
+                  invited_client_phone: clientInviteData.invited_client_phone,
+                  invited_client_name: clientInviteData.invited_client_name,
+                  organization_id: clientInviteData.organization_id,
+                })
+                
+                // Если приглашение использовано, собираем user_id для восстановления данных
+                if (invite.used_at && invite.used_by) {
+                  usedByUserIds.add(invite.used_by)
+                  console.log('[DiaryPage] ✅ Найдено использованное приглашение:', {
+                    token: invite.token,
+                    used_at: invite.used_at,
+                    used_by: invite.used_by,
+                    invite_id: invite.id,
+                    diary_id: clientInviteData.diary_id,
+                    isForCurrentDiary,
+                  })
+                } else {
+                  console.log('[DiaryPage] ⚠️ Приглашение не использовано или нет used_by:', {
+                    token: invite.token,
+                    used_at: invite.used_at,
+                    used_by: invite.used_by,
+                    invite_id: invite.id,
+                    diary_id: clientInviteData.diary_id,
+                    isForCurrentDiary,
+                  })
+                }
+              } else {
+                console.log('[DiaryPage] Пропуск приглашения: organization_id не совпадает и не для текущего дневника', {
+                  invite_id: invite.id,
+                  invite_org_id: clientInviteData.organization_id,
+                  current_org_id: effectiveOrganizationId,
+                  diary_id: clientInviteData.diary_id,
+                  current_diary_id: id,
+                })
+              }
+            }
+          })
+        }
+        
+        // ВАЖНО: Проверяем, есть ли использованные приглашения, даже если used_by не загружен
+        // Это может быть из-за RLS политик, поэтому проверяем через used_at
+        const usedInviteTokens = Array.from(inviteTokensMap.entries())
+          .filter(([, data]) => data.used_at && !data.used_by)
+        
+        if (usedInviteTokens.length > 0) {
+          console.log('[DiaryPage] ⚠️ Найдены использованные приглашения без used_by (возможно, RLS блокирует):', usedInviteTokens.length)
+          console.log('[DiaryPage] Детали приглашений без used_by:', usedInviteTokens.map(([token, data]) => ({ token, used_at: data.used_at })))
+          // Пытаемся найти клиентов по другим признакам (например, по token в diary_client_links)
+        }
+        
+        // Восстанавливаем данные из invite_tokens, если diary_client_links не обновлен
+        // Если приглашение использовано (used_at не null), но diary_client_links не обновлен,
+        // загружаем клиента по used_by и обновляем linksMap
+        if (usedByUserIds.size > 0) {
+          console.log('[DiaryPage] Восстанавливаем данные для использованных приглашений, used_by:', Array.from(usedByUserIds))
+          
+          // Загружаем клиентов по used_by (user_id)
+          const { data: registeredClients, error: registeredClientsError } = await supabase
+            .from('clients')
+            .select('id, user_id, first_name, last_name, phone, invited_by_organization_id')
+            .in('user_id', Array.from(usedByUserIds))
+          
+          console.log('[DiaryPage] Загружено зарегистрированных клиентов по used_by:', registeredClients?.length || 0, 'Ошибка:', registeredClientsError)
+          
+          if (!registeredClientsError && registeredClients && registeredClients.length > 0) {
+            // Создаем карту user_id -> client_id
+            const userIdToClientMap = new Map(registeredClients.map((c: any) => [c.user_id, c]))
+            
+            // Обновляем linksMap и inviteTokensMap с найденными данными
+            inviteTokensMap.forEach((inviteData, token) => {
+              if (inviteData.used_by && inviteData.used_at) {
+                const clientData = userIdToClientMap.get(inviteData.used_by)
+                if (clientData) {
+                  // Проверяем, что клиент действительно был приглашен этой организацией
+                  const orgIdMatches = !effectiveOrganizationId || 
+                    !inviteData.organization_id || 
+                    inviteData.organization_id === effectiveOrganizationId ||
+                    clientData.invited_by_organization_id === effectiveOrganizationId
+                  
+                  if (orgIdMatches) {
+                    // Обновляем linksMap, если запись существует, или создаем новую
+                    const existingLink = linksMap.get(token)
+                    if (existingLink) {
+                      // Обновляем существующую запись
+                      existingLink.client_id = clientData.id
+                      existingLink.accepted_by = inviteData.used_by
+                      existingLink.accepted_at = inviteData.used_at
+                      console.log('[DiaryPage] Восстановлены данные для существующей записи:', {
+                        token,
+                        client_id: clientData.id,
+                        accepted_by: inviteData.used_by,
+                        accepted_at: inviteData.used_at,
+                      })
+                    } else {
+                      // Создаем новую запись в linksMap
+                      linksMap.set(token, {
+                        client_id: clientData.id,
+                        accepted_by: inviteData.used_by,
+                        accepted_at: inviteData.used_at,
+                      })
+                      console.log('[DiaryPage] Создана новая запись в linksMap для токена:', token)
+                    }
+                  }
+                }
+              }
+            })
+            
+            // Добавляем данные восстановленных клиентов в clientsData для последующего использования
+            // Это будет использовано при формировании finalClientsList
+            registeredClients.forEach((client: any) => {
+              if (!clientsData[client.id]) {
+                clientsData[client.id] = {
+                  first_name: client.first_name || undefined,
+                  last_name: client.last_name || undefined,
+                  user_id: client.user_id || undefined,
+                  phone: client.phone || undefined,
+                }
+                console.log('[DiaryPage] Добавлены данные восстановленного клиента в clientsData:', client.id)
+              }
+            })
+          }
+        }
+        
+        // Если есть данные из diary_client_links или invite_tokens, обрабатываем их
+        if (linksMap.size > 0 || inviteTokensMap.size > 0) {
+
+          // Загружаем информацию о клиентах, которые зарегистрировались
+          // Собираем все client_id и accepted_by из linksMap
+          const allClientIds = new Set<string>()
+          const allAcceptedByUserIds = new Set<string>()
+          
+          linksMap.forEach((linkData) => {
+            if (linkData.client_id) {
+              allClientIds.add(linkData.client_id)
+            }
+            if (linkData.accepted_by) {
+              allAcceptedByUserIds.add(linkData.accepted_by)
+            }
+          })
+          
+          // Также собираем used_by из invite_tokens для зарегистрированных клиентов
+          inviteTokensMap.forEach((inviteData) => {
+            if (inviteData.used_by && inviteData.used_at) {
+              allAcceptedByUserIds.add(inviteData.used_by)
+            }
+          })
+          
+          console.log('[DiaryPage] ID зарегистрированных клиентов из client_id:', Array.from(allClientIds))
+          console.log('[DiaryPage] User ID из accepted_by и used_by:', Array.from(allAcceptedByUserIds))
+          
+          // Объявляем clientsData заранее
+          let clientsData: Record<string, { first_name?: string; last_name?: string; user_id?: string; phone?: string }> = {}
+          
+          // Если есть accepted_by, но нет client_id, загружаем клиентов по user_id
+          if (allAcceptedByUserIds.size > 0) {
+            const acceptedByUserIdsArray = Array.from(allAcceptedByUserIds)
+            console.log('[DiaryPage] Загружаем клиентов по accepted_by (user_id)')
+            const { data: clientsByUserId, error: clientsByUserIdError } = await supabase
+              .from('clients')
+              .select('id, user_id, first_name, last_name, phone')
+              .in('user_id', acceptedByUserIdsArray)
+            
+            console.log('[DiaryPage] Загружено клиентов по user_id:', clientsByUserId?.length || 0, 'Ошибка:', clientsByUserIdError)
+            
+            if (!clientsByUserIdError && clientsByUserId && clientsByUserId.length > 0) {
+              // Обновляем linksMap с найденными client_id
+              const userIdToClientId = new Map(clientsByUserId.map((c: any) => [c.user_id, c.id]))
+              linksMap.forEach((linkData, token) => {
+                if (!linkData.client_id && linkData.accepted_by) {
+                  const foundClientId = userIdToClientId.get(linkData.accepted_by)
+                  if (foundClientId) {
+                    linkData.client_id = foundClientId
+                    allClientIds.add(foundClientId)
+                    console.log('[DiaryPage] Найден client_id для токена:', token, 'client_id:', foundClientId)
+                  }
+                }
+              })
+              
+              // Добавляем данные клиентов в clientsData
+              clientsByUserId.forEach((client: any) => {
+                clientsData[client.id] = {
+                  first_name: client.first_name || undefined,
+                  last_name: client.last_name || undefined,
+                  user_id: client.user_id || undefined,
+                  phone: client.phone || undefined,
+                }
+              })
+            }
+          }
+          
+          // Загружаем клиентов по client_id
+          if (allClientIds.size > 0) {
+            const clientIdsArray = Array.from(allClientIds)
+            const { data: clients, error: clientsError } = await supabase
+              .from('clients')
+              .select('id, first_name, last_name, user_id, phone')
+              .in('id', clientIdsArray)
+
+            console.log('[DiaryPage] Загружено клиентов из БД:', clients?.length || 0, 'Ошибка:', clientsError)
+
+            if (!clientsError && clients && clients.length > 0) {
+              clients.forEach((client: any) => {
+                clientsData[client.id] = {
+                  first_name: client.first_name || undefined,
+                  last_name: client.last_name || undefined,
+                  user_id: client.user_id || undefined,
+                  phone: client.phone || undefined,
+                }
+              })
+            }
+          }
+
+          // Объединяем данные из diary_client_links и invite_tokens
+          // Приоритет: diary_client_links (основной источник истины)
+          const finalClientsList: Array<{
+            invite_id: string
+            token: string
+            client_id: string | null
+            invited_client_phone: string | null
+            invited_client_name: string | null
+            used_at: string | null
+            used_by: string | null
+            accepted_at: string | null
+            accepted_by: string | null
+            created_at: string
+            registered_client_name?: string
+            registered_client_phone?: string
+            registered_client_user_id?: string
+          }> = []
+
+          // Обрабатываем все записи из diary_client_links (основной источник)
+          linksMap.forEach((linkData, token) => {
+            const inviteTokenData = inviteTokensMap.get(token)
+            // Используем client_id из linksMap (может быть восстановлен из invite_tokens)
+            const clientId = linkData.client_id
+            // Если client_id есть, загружаем данные клиента
+            let clientInfo = clientId ? clientsData[clientId] : null
+            
+            // Если client_id нет, но есть used_by в invite_tokens, пытаемся найти клиента
+            if (!clientId && inviteTokenData?.used_by) {
+              // Ищем клиента по used_by в уже загруженных данных
+              const foundClient = Object.values(clientsData).find(c => c.user_id === inviteTokenData.used_by)
+              if (foundClient) {
+                // Находим client_id по user_id
+                const foundClientId = Object.keys(clientsData).find(id => clientsData[id].user_id === inviteTokenData.used_by)
+                if (foundClientId) {
+                  clientInfo = clientsData[foundClientId]
+                  // Обновляем linkData для последующего использования
+                  linkData.client_id = foundClientId
+                }
+              }
+            }
+            
+            // Определяем accepted_at: приоритет у linksMap, но если null, используем used_at из invite_tokens
+            const acceptedAt = linkData.accepted_at || inviteTokenData?.used_at || null
+            // Определяем accepted_by: приоритет у linksMap, но если null, используем used_by из invite_tokens
+            const acceptedBy = linkData.accepted_by || inviteTokenData?.used_by || null
+
+            finalClientsList.push({
+              invite_id: inviteTokenData?.invite_id || `link_${token}`,
+              token: token,
+              client_id: clientId || (acceptedBy ? Object.keys(clientsData).find(id => clientsData[id].user_id === acceptedBy) || null : null),
+              invited_client_phone: inviteTokenData?.invited_client_phone || clientInfo?.phone || null,
+              invited_client_name: inviteTokenData?.invited_client_name || (clientInfo
+                ? `${clientInfo.first_name || ''} ${clientInfo.last_name || ''}`.trim() || null
+                : null),
+              used_at: inviteTokenData?.used_at || null,
+              used_by: inviteTokenData?.used_by || null,
+              accepted_at: acceptedAt,
+              accepted_by: acceptedBy,
+              created_at: inviteTokenData?.created_at || acceptedAt || new Date().toISOString(),
+              registered_client_name: clientInfo
+                ? `${clientInfo.first_name || ''} ${clientInfo.last_name || ''}`.trim() || undefined
+                : undefined,
+              registered_client_phone: clientInfo?.phone || undefined,
+              registered_client_user_id: clientInfo?.user_id || undefined,
+            })
+          })
+
+          // Добавляем приглашения из invite_tokens, которых нет в diary_client_links
+          inviteTokensMap.forEach((inviteData, token) => {
+            if (!linksMap.has(token)) {
+              // Если приглашение использовано, пытаемся найти клиента
+              let clientInfo: { first_name?: string; last_name?: string; user_id?: string; phone?: string } | null = null
+              let clientId: string | null = null
+              
+              if (inviteData.used_by && inviteData.used_at) {
+                // Ищем клиента по used_by в уже загруженных данных
+                const foundClient = Object.values(clientsData).find(c => c.user_id === inviteData.used_by)
+                if (foundClient) {
+                  clientId = Object.keys(clientsData).find(id => clientsData[id].user_id === inviteData.used_by) || null
+                  clientInfo = foundClient
+                }
+              }
+              
+              finalClientsList.push({
+                invite_id: inviteData.invite_id,
+                token: token,
+                client_id: clientId,
+                invited_client_phone: inviteData.invited_client_phone || clientInfo?.phone || null,
+                invited_client_name: inviteData.invited_client_name || (clientInfo
+                  ? `${clientInfo.first_name || ''} ${clientInfo.last_name || ''}`.trim() || null
+                  : null),
+                used_at: inviteData.used_at || null,
+                used_by: inviteData.used_by || null,
+                accepted_at: inviteData.used_at || null, // Если приглашение использовано, считаем его принятым
+                accepted_by: inviteData.used_by || null,
+                created_at: inviteData.created_at,
+                registered_client_name: clientInfo
+                  ? `${clientInfo.first_name || ''} ${clientInfo.last_name || ''}`.trim() || undefined
+                  : undefined,
+                registered_client_phone: clientInfo?.phone || undefined,
+                registered_client_user_id: clientInfo?.user_id || undefined,
+              })
+            }
+          })
+
+          console.log('[DiaryPage] Итоговый список клиентов:', finalClientsList.length)
+          setInvitedClients(finalClientsList)
+        } else {
+          // Если нет данных ни из diary_client_links, ни из invite_tokens
+          console.log('[DiaryPage] Нет данных о клиентах')
+          setInvitedClients([])
         }
       } catch (error) {
-        console.warn('Не удалось прочитать diary_external_access_links', error)
+        console.error('Ошибка загрузки приглашенных клиентов:', error)
+        setInvitedClients([])
       }
     }
-  }, [id, diary?.patient_card_id, diary?.organization_id, effectiveOrganizationId])
+
+    loadInvitedClients()
+  }, [id, isOrganization, effectiveOrganizationId, organizationClientLink?.accepted_by]) // Перезагружаем при изменении статуса клиента
+
+  // Загрузка внешних ссылок из Supabase
+  useEffect(() => {
+    if (!id) return
+
+    const loadExternalLinks = async () => {
+      try {
+        // Загружаем внешние ссылки из таблицы diary_external_access_links
+        const { data: externalLinks, error: linksError } = await supabase
+          .from('diary_external_access_links')
+          .select('*')
+          .eq('diary_id', id)
+          .is('revoked_at', null) // Только активные ссылки
+          .order('created_at', { ascending: false })
+
+        if (linksError) {
+          console.error('Ошибка загрузки внешних ссылок:', linksError)
+          setExternalAccessLinks([])
+          return
+        }
+
+        if (externalLinks && externalLinks.length > 0) {
+          // Преобразуем данные из БД в формат для компонента
+          const formattedLinks = externalLinks.map(link => ({
+            id: link.id,
+            token: link.link_token,
+            link: `${appOrigin}/diaries/${id}?access=${link.link_token}`,
+            invited_email: link.invited_email || null,
+            invited_phone: link.invited_phone || null,
+            expires_at: link.expires_at || null,
+            created_at: link.created_at,
+          }))
+          setExternalAccessLinks(formattedLinks)
+        } else {
+          setExternalAccessLinks([])
+        }
+      } catch (error) {
+        console.error('Ошибка загрузки внешних ссылок:', error)
+        setExternalAccessLinks([])
+      }
+    }
+
+    loadExternalLinks()
+  }, [id])
 
   useEffect(() => {
     if (!isCalendarOpen) return
@@ -1073,14 +1677,46 @@ export const DiaryPage = () => {
     }
 
     const isOwner = matches(diary.owner_id, userId)
-    const isClientAccess = matches(diary.client_id, userId)
+    
+    // Проверяем доступ клиента
+    // Если дневник загружен, значит RLS разрешил доступ через has_diary_access
+    // Дополнительно проверяем через organizationClientLink (принятое приглашение)
+    let isClientAccess = false
+    if (userRole === 'client') {
+      console.log('[DiaryPage] Проверка доступа клиента:', {
+        diaryId: diary.id,
+        diaryClientId: diary.client_id,
+        userId,
+        organizationClientLink: organizationClientLink?.accepted_by,
+      })
+      
+      // Если дневник загружен, значит RLS разрешил доступ через has_diary_access
+      // Это означает, что клиент имеет доступ (либо через owner_client_id, либо через diary_client_links)
+      // Поэтому если дневник загружен и пользователь - клиент, то доступ есть
+      if (diary.id) {
+        isClientAccess = true
+        console.log('[DiaryPage] ✅ Клиент имеет доступ через RLS (дневник загружен)')
+      }
+      // Дополнительная проверка через organizationClientLink (принятое приглашение)
+      if (organizationClientLink?.accepted_by === userId) {
+        isClientAccess = true
+        console.log('[DiaryPage] ✅ Клиент имеет доступ через organizationClientLink')
+      }
+    } else {
+      console.log('[DiaryPage] ⚠️ userRole не является client:', userRole, 'userId:', userId)
+    }
+    
+    // Для организаций: проверяем organization_id или created_by (кто создал дневник)
     const organizationAccountAccess =
       isOrganizationAccount &&
       (matches(diary.organization_id, effectiveOrganizationId) ||
-        (!diary.organization_id && matches(diary.owner_id, effectiveOrganizationId)))
+        matches(diary.organization_id, userId) ||
+        (!diary.organization_id && matches(diary.owner_id, effectiveOrganizationId)) ||
+        (!diary.organization_id && matches(diary.owner_id, userId)))
     const assignedEmployeeIds = assignedEmployees.map(employee => employee.user_id)
-    const requiresAssignment =
-      assignmentOrganizationType === 'patronage_agency' || assignmentOrganizationType === 'pension'
+    // Для патронажных агентств требуется явное назначение через diary_employee_access
+    // Для пансионатов доступ ко всем дневникам организации автоматически (без явного назначения)
+    const requiresAssignment = assignmentOrganizationType === 'patronage_agency'
     const hasEmployeeAssignment =
       !requiresAssignment || (userId ? assignedEmployeeIds.includes(userId) : false)
     const organizationEmployeeAccess =
@@ -1094,6 +1730,19 @@ export const DiaryPage = () => {
     const hasBaseAccess =
       isOwner || isClientAccess || organizationAccountAccess || organizationEmployeeAccess || caregiverAccess
 
+    console.log('[DiaryPage] accessState calculation:', {
+      isOwner,
+      isClientAccess,
+      organizationAccountAccess,
+      organizationEmployeeAccess,
+      caregiverAccess,
+      hasBaseAccess,
+      userRole,
+      userId,
+      diaryId: diary.id,
+      diaryClientId: diary.client_id,
+    })
+
     return {
       hasBaseAccess,
       isOwner,
@@ -1102,21 +1751,25 @@ export const DiaryPage = () => {
       organizationEmployeeAccess,
       caregiverAccess,
       canManageDiarySettings: isOwner || organizationAccountAccess,
-      canEditCardSettings: isOwner,
-      canManageMetricsSettings: isOwner || organizationAccountAccess,
-      canManageAccessSettings: isOwner,
+      canEditCardSettings: isOwner || isClientAccess,
+      // ВАЖНО: Сиделки могут редактировать показатели (заполнять и просматривать)
+      canManageMetricsSettings: isOwner || isClientAccess || organizationAccountAccess || caregiverAccess,
+      canManageAccessSettings: isOwner || isClientAccess,
     }
   }, [
     diary,
     userId,
+    userRole, // ВАЖНО: добавляем userRole в зависимости, чтобы accessState пересчитывался при изменении роли
     effectiveOrganizationId,
     userOrganizationId,
     effectiveCaregiverId,
+    caregiverOrganizationId, // Добавляем caregiverOrganizationId в зависимости
     isOrganizationAccount,
     isOrgEmployee,
     isCaregiver,
     assignedEmployees,
     organizationType,
+    organizationClientLink, // Добавляем organizationClientLink для проверки доступа через приглашение
   ])
 
   // Функция для загрузки назначенных сотрудников из Supabase
@@ -1124,45 +1777,66 @@ export const DiaryPage = () => {
     if (!diary || !id) return
 
     try {
-      const { data, error } = await supabase
+      // Загружаем назначенных сотрудников (для пансионатов - все записи, включая отозванные)
+      const { data: accessData, error: accessError } = await supabase
         .from('diary_employee_access')
-        .select(`
-          user_id,
-          organization_employees!inner (
-            first_name,
-            last_name,
-            employee_role,
-            organizations!inner (
-              organization_type
-            )
-          )
-        `)
+        .select('user_id, revoked_at')
         .eq('diary_id', id)
-        .is('revoked_at', null)
 
-      if (error) {
-        console.error('Ошибка загрузки назначенных сотрудников:', error)
-        // Fallback на localStorage
-        const storedAssignments = JSON.parse(localStorage.getItem('diary_employee_access') || '{}')
-        const currentAssignments = Array.isArray(storedAssignments?.[diary.id])
-          ? storedAssignments[diary.id]
-          : []
-        return currentAssignments.map((item: any) => ({
-          user_id: item.user_id,
-          first_name: item.first_name || '',
-          last_name: item.last_name || '',
-          role: item.role || '',
-          organization_type: item.organization_type || null,
-        }))
+      if (accessError) {
+        console.error('Ошибка загрузки назначенных сотрудников:', accessError)
+        return []
       }
 
-      // Преобразуем данные из Supabase
-      return (data || []).map((item: any) => ({
-        user_id: item.user_id,
-        first_name: item.organization_employees?.first_name || '',
-        last_name: item.organization_employees?.last_name || '',
-        role: item.organization_employees?.employee_role || '',
-        organization_type: item.organization_employees?.organizations?.organization_type || null,
+      // Для пансионатов: загружаем все записи (нужны для проверки revoked_at)
+      // Для патронажных агентств: только активные доступы
+      const activeAccessData = (accessData || []).filter((item: any) => {
+        if (assignmentOrganizationType === 'pension') {
+          return true // Возвращаем все записи для пансионатов
+        }
+        return !item.revoked_at // Для патронажных агентств только активные
+      })
+      
+      if (activeAccessData.length === 0 && assignmentOrganizationType !== 'pension') {
+        return []
+      }
+
+      // Получаем user_id из доступа
+      const userIds = activeAccessData.map((item: any) => item.user_id).filter(Boolean)
+
+      if (userIds.length === 0 && assignmentOrganizationType !== 'pension') {
+        return []
+      }
+
+      // Загружаем данные сотрудников
+      const { data: employeesData, error: employeesError } = await supabase
+        .from('organization_employees')
+        .select(`
+          user_id,
+          first_name,
+          last_name,
+          role,
+          organization_id,
+          organizations (
+            organization_type
+          )
+        `)
+        .in('user_id', userIds.length > 0 ? userIds : [])
+
+      if (employeesError) {
+        console.error('Ошибка загрузки данных сотрудников:', employeesError)
+        return []
+      }
+
+      // Преобразуем данные, включая информацию о revoked_at для пансионатов
+      const accessMap = new Map(activeAccessData.map((item: any) => [item.user_id, item.revoked_at]))
+      return (employeesData || []).map((emp: any) => ({
+        user_id: emp.user_id,
+        first_name: emp.first_name || '',
+        last_name: emp.last_name || '',
+        role: emp.role || '',
+        organization_type: (emp.organizations as any)?.organization_type || null,
+        revoked_at: accessMap.get(emp.user_id) || null, // Добавляем информацию о revoked_at
       }))
     } catch (error) {
       console.error('Ошибка загрузки назначенных сотрудников:', error)
@@ -1179,15 +1853,40 @@ export const DiaryPage = () => {
       let normalizedAssignments: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string; organization_type?: OrganizationType | null }> = []
 
       // Загружаем из Supabase
-      normalizedAssignments = await loadAssignedEmployees()
+      const assignments = await loadAssignedEmployees()
+      normalizedAssignments = assignments || []
 
       let employeesForOrganization: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> = []
 
       if (isOrganizationAccount) {
         try {
-          // Загружаем сотрудников из Supabase
-          const orgId = normalizeId(effectiveOrganizationId) || normalizeId(diary.organization_id)
+          // Загружаем organization_id из таблицы organizations по user_id
+          // effectiveOrganizationId может быть user_id, а нам нужен organization_id
+          let orgId = normalizeId(diary.organization_id)
+          
+          // Если organization_id нет в дневнике, получаем его из таблицы organizations
+          if (!orgId && userId) {
+            const { data: orgData, error: orgError } = await supabase
+              .from('organizations')
+              .select('id')
+              .eq('user_id', userId)
+              .single()
+            
+            if (!orgError && orgData?.id) {
+              orgId = orgData.id
+              console.log('[DiaryPage] Loaded organization_id from organizations table:', orgId)
+            } else {
+              // Fallback: используем effectiveOrganizationId (может быть user_id)
+              orgId = normalizeId(effectiveOrganizationId)
+              console.log('[DiaryPage] Using effectiveOrganizationId as fallback:', orgId)
+            }
+          } else if (!orgId) {
+            // Если нет organization_id в дневнике, используем effectiveOrganizationId
+            orgId = normalizeId(effectiveOrganizationId)
+          }
+
           if (orgId) {
+            console.log('[DiaryPage] Loading employees for organization_id:', orgId)
             const { data: employeesData, error: employeesError } = await supabase
               .from('organization_employees')
               .select(`
@@ -1201,7 +1900,10 @@ export const DiaryPage = () => {
               `)
               .eq('organization_id', orgId)
 
-            if (!employeesError && employeesData) {
+            if (employeesError) {
+              console.error('[DiaryPage] Error loading employees:', employeesError)
+            } else if (employeesData) {
+              console.log('[DiaryPage] Loaded employees:', employeesData.length)
               employeesForOrganization = employeesData.map((emp: any) => ({
                 user_id: emp.user_id,
                 first_name: emp.first_name || '',
@@ -1210,38 +1912,21 @@ export const DiaryPage = () => {
                 organization_type: emp.organizations?.organization_type || null,
               }))
             }
+          } else {
+            console.warn('[DiaryPage] No organization_id found for loading employees')
           }
 
-          // Fallback на localStorage если Supabase не работает
+          // Если сотрудники не найдены, используем пустой массив
           if (employeesForOrganization.length === 0) {
-            const employeesRaw = JSON.parse(localStorage.getItem('local_employees') || '[]')
-            const employees = Array.isArray(employeesRaw) ? [...employeesRaw] : []
-
-            const candidateOrgIds = [
-              normalizeId(effectiveOrganizationId),
-              normalizeId(userOrganizationId),
-              normalizeId(currentUser.organization_id),
-              normalizeId(diary.organization_id),
-            ]
-              .filter((id): id is string => Boolean(id))
-              .filter((id, index, arr) => arr.indexOf(id) === index)
-
-            const filteredEmployees = employees.filter((employee: any) => {
-              if (!employee) return false
-              const employeeOrgId = normalizeId(employee.organization_id)
-              return Boolean(employeeOrgId && candidateOrgIds.includes(employeeOrgId))
+            console.warn('[DiaryPage] Сотрудники не найдены для организации:', {
+              orgId,
+              effectiveOrganizationId,
+              diaryOrganizationId: diary.organization_id,
+              userId
             })
-
-            employeesForOrganization = filteredEmployees.map((employee: any) => ({
-              user_id: employee.user_id || employee.id,
-              first_name: employee.first_name || '',
-              last_name: employee.last_name || '',
-              role: employee.role || '',
-              organization_type: employee.organization_type || null,
-            }))
           }
         } catch (error) {
-          console.warn('Не удалось загрузить сотрудников организации', error)
+          console.error('[DiaryPage] Не удалось загрузить сотрудников организации', error)
           employeesForOrganization = []
         }
       }
@@ -1249,13 +1934,29 @@ export const DiaryPage = () => {
       setAvailableOrgEmployees(employeesForOrganization)
 
       // Для пансионатов по умолчанию все сотрудники имеют доступ, если доступы не настроены явно.
+      // НО: не назначаем автоматически, если есть записи с revoked_at (значит доступы уже управлялись)
       let assignmentsToPersist: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> | null =
         null
+      
+      // Проверяем, есть ли записи в diary_employee_access (даже с revoked_at)
+      // Если есть - значит доступы уже управлялись, не назначаем автоматически
+      let hasAnyAccessRecords = false
+      if (isOrganizationAccount && assignmentOrganizationType === 'pension' && id) {
+        const { data: anyAccessData } = await supabase
+          .from('diary_employee_access')
+          .select('user_id')
+          .eq('diary_id', id)
+          .limit(1)
+        
+        hasAnyAccessRecords = (anyAccessData?.length || 0) > 0
+      }
+      
       if (
         isOrganizationAccount &&
         assignmentOrganizationType === 'pension' &&
         normalizedAssignments.length === 0 &&
-        employeesForOrganization.length > 0
+        employeesForOrganization.length > 0 &&
+        !hasAnyAccessRecords // Не назначаем автоматически, если доступы уже управлялись
       ) {
         normalizedAssignments = employeesForOrganization
         assignmentsToPersist = employeesForOrganization
@@ -1441,10 +2142,6 @@ export const DiaryPage = () => {
 
   const canEditMetrics = () => hasBaseAccess
   const canFillMetrics = canEditMetrics()
-  const generateMetricId = () =>
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : `metric_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
 
   type EmployeeAccessEntry = {
     user_id: string
@@ -1454,80 +2151,12 @@ export const DiaryPage = () => {
     organization_type?: OrganizationType | null
   }
 
-  const toEmployeeAccessEntry = (source: any): EmployeeAccessEntry | null => {
-    if (!source) return null
-    const normalizedId = normalizeId(source.user_id || source.id)
-    if (!normalizedId) return null
-    return {
-      user_id: normalizedId,
-      first_name: source.first_name || source.firstName || '',
-      last_name: source.last_name || source.lastName || '',
-      role: source.role || source.employee_role || null,
-      organization_type:
-        source.organization_type || source.organizationType || source.type || null,
-    }
-  }
-
   const persistAssignedEmployees = (next: EmployeeAccessEntry[]) => {
     if (!diary) return
-    try {
-      const stored = JSON.parse(localStorage.getItem('diary_employee_access') || '{}')
-      stored[diary.id] = next.map(item => ({
-        user_id: item.user_id,
-        first_name: item.first_name || '',
-        last_name: item.last_name || '',
-        role: item.role || '',
-        organization_type: item.organization_type || null,
-      }))
-      localStorage.setItem('diary_employee_access', JSON.stringify(stored))
-      console.log('[DiaryPage] persistAssignedEmployees', { diaryId: diary.id, next })
-      setAssignedEmployees(next)
-    } catch (error) {
-      console.warn('Не удалось сохранить список специалистов дневника', error)
-    }
-  }
-
-  const resolveEmployeeById = (targetId: string): EmployeeAccessEntry | null => {
-    const normalizedTarget = normalizeId(targetId)
-    if (!normalizedTarget) return null
-
-    const sources: any[] = []
-    sources.push(...availableOrgEmployees)
-
-    try {
-      const employees = JSON.parse(localStorage.getItem('local_employees') || '[]')
-      if (Array.isArray(employees)) {
-        sources.push(...employees)
-      }
-    } catch (error) {
-      console.warn('[DiaryPage] resolveEmployeeById: failed to read local_employees', error)
-    }
-
-    try {
-      const users = JSON.parse(localStorage.getItem('local_users') || '[]')
-      if (Array.isArray(users)) {
-        sources.push(
-          ...users.map(user => ({
-            ...user,
-            first_name:
-              user.profile_data?.firstName || user.first_name || user.firstName || user.name || '',
-            last_name:
-              user.profile_data?.lastName || user.last_name || user.lastName || user.surname || '',
-          }))
-        )
-      }
-    } catch (error) {
-      console.warn('[DiaryPage] resolveEmployeeById: failed to read local_users', error)
-    }
-
-    for (const source of sources) {
-      const entry = toEmployeeAccessEntry(source)
-      if (entry && entry.user_id === normalizedTarget) {
-        return entry
-      }
-    }
-
-    return null
+    // Сохранение идет через RPC assign_employee_to_diary / remove_employee_from_diary
+    // localStorage больше не используется
+    console.log('[DiaryPage] persistAssignedEmployees', { diaryId: diary.id, next })
+    setAssignedEmployees(next)
   }
 
   // Функция для назначения доступа сотруднику
@@ -1540,15 +2169,21 @@ export const DiaryPage = () => {
     }
     const normalizeTarget = (value: unknown) => String(value)
 
-    if (
-      assignedEmployees.some(item => normalizeTarget(item.user_id) === normalizeTarget(targetId))
-    ) {
+    // Проверяем, есть ли уже активный доступ (для пансионатов учитываем revoked_at)
+    const existingEmployee = assignedEmployees.find(
+      item => normalizeTarget(item.user_id) === normalizeTarget(targetId)
+    )
+    
+    // Если сотрудник есть в списке и у него нет revoked_at (активный доступ), не добавляем
+    if (existingEmployee && !existingEmployee.revoked_at) {
       if (!employeeId) {
         setSelectedEmployeeId('')
       }
-      console.log('[DiaryPage] handleAddEmployeeAccess: already has access', { targetId })
+      console.log('[DiaryPage] handleAddEmployeeAccess: already has active access', { targetId })
       return
     }
+    
+    // Если сотрудник есть в списке, но у него revoked_at (для пансионатов), продолжаем - это восстановление доступа
 
     try {
       // Используем RPC для назначения доступа
@@ -1559,31 +2194,31 @@ export const DiaryPage = () => {
 
       if (error) {
         console.error('Ошибка назначения доступа:', error)
-        setSettingsError(error.message || 'Не удалось назначить доступ. Попробуйте позже.')
+        alert(error.message || 'Не удалось назначить доступ. Попробуйте позже.')
         return
       }
 
-      // Обновляем локальное состояние
-      const accessEntry = resolveEmployeeById(targetId)
-      if (accessEntry) {
-        const next = [...assignedEmployees, accessEntry]
-        setAssignedEmployees(next)
-        if (!employeeId) {
-          setSelectedEmployeeId('')
-        }
-        setSettingsError(null)
-      } else {
-        // Если не нашли в локальных данных, перезагружаем список
-        await loadAssignedEmployees()
+      // Перезагружаем список назначенных сотрудников из БД
+      const updatedAssignments = await loadAssignedEmployees()
+      setAssignedEmployees(updatedAssignments || [])
+      
+      if (!employeeId) {
+        setSelectedEmployeeId('')
       }
+      setSettingsError(null)
+      
+      console.log('[DiaryPage] Доступ сотрудника предоставлен, список обновлен')
     } catch (error) {
       console.error('Ошибка назначения доступа:', error)
-      setSettingsError('Не удалось назначить доступ. Попробуйте позже.')
+      alert('Не удалось назначить доступ. Попробуйте позже.')
     }
   }
 
   const handleRemoveEmployeeAccess = async (userId: string) => {
     if (!diary || !id) return
+
+    const confirmed = window.confirm('Убрать доступ у сотрудника к этому дневнику?')
+    if (!confirmed) return
 
     try {
       // Используем RPC для отзыва доступа
@@ -1594,21 +2229,22 @@ export const DiaryPage = () => {
 
       if (error) {
         console.error('Ошибка отзыва доступа:', error)
-        setSettingsError(error.message || 'Не удалось отозвать доступ. Попробуйте позже.')
+        alert('Не удалось отозвать доступ. Попробуйте позже.')
         return
       }
 
-      // Обновляем локальное состояние
-      const next = assignedEmployees.filter(employee => employee.user_id !== userId)
-      setAssignedEmployees(next)
-      setSettingsError(null)
+      // Перезагружаем список назначенных сотрудников из БД
+      const updatedAssignments = await loadAssignedEmployees()
+      setAssignedEmployees(updatedAssignments || [])
+      
+      console.log('[DiaryPage] Доступ сотрудника отозван, список обновлен')
     } catch (error) {
       console.error('Ошибка отзыва доступа:', error)
-      setSettingsError('Не удалось отозвать доступ. Попробуйте позже.')
+      alert('Не удалось отозвать доступ. Попробуйте позже.')
     }
   }
 
-  const handleRemoveAccess = (accessType: 'caregiver' | 'organization') => {
+  const handleRemoveAccess = async (accessType: 'caregiver' | 'organization') => {
     if (!diary || !id) return
 
     const confirmed = window.confirm(
@@ -1619,82 +2255,193 @@ export const DiaryPage = () => {
 
     if (!confirmed) return
 
-    // Обновляем дневник в localStorage
-    const diaries = JSON.parse(localStorage.getItem('diaries') || '[]')
-    const updatedDiaries = diaries.map((d: Diary) => {
-      if (d.id === id) {
-        return {
-          ...d,
-          [accessType === 'caregiver' ? 'caregiver_id' : 'organization_id']: null
-        }
-      }
-      return d
-    })
+    try {
+      // Обновляем дневник в Supabase
+      const updateField = accessType === 'caregiver' ? 'caregiver_id' : 'organization_id'
+      const { error: updateError } = await supabase
+        .from('diaries')
+        .update({ [updateField]: null })
+        .eq('id', id)
 
-    localStorage.setItem('diaries', JSON.stringify(updatedDiaries))
-
-    // Обновляем состояние
-    setDiary({
-      ...diary,
-      [accessType === 'caregiver' ? 'caregiver_id' : 'organization_id']: null
-    })
-    if (accessType === 'organization') {
-      persistAssignedEmployees([])
-      try {
-        const stored = JSON.parse(localStorage.getItem('diary_client_links') || '{}')
-        if (stored && stored[id]) {
-          delete stored[id]
-          localStorage.setItem('diary_client_links', JSON.stringify(stored))
-        }
-      } catch (error) {
-        console.warn('Не удалось очистить ссылку клиента при удалении доступа организации', error)
+      if (updateError) {
+        console.error('Ошибка отзыва доступа:', updateError)
+        alert('Не удалось отозвать доступ. Попробуйте позже.')
+        return
       }
-      setOrganizationClientLink(null)
-      setAttachedClient(null)
+
+      // Обновляем состояние
+      setDiary({
+        ...diary,
+        [updateField]: null
+      })
+
+      if (accessType === 'caregiver') {
+        // При отзыве доступа у сиделки просто убираем caregiver_id из дневника
+        // Карточка подопечного остается у клиента и НЕ удаляется
+        // Дневник также остается у клиента, просто сиделка теряет к нему доступ
+        console.log('[DiaryPage] Доступ сиделки отозван, дневник и карточка остаются у клиента')
+      } else if (accessType === 'organization') {
+        // Очищаем информацию об организации
+        setOrganizationInfo(null)
+        persistAssignedEmployees([])
+        // Удаляем ссылку клиента из Supabase при отзыве доступа организации
+        try {
+          const { error: deleteError } = await supabase
+            .from('diary_client_links')
+            .delete()
+            .eq('diary_id', id)
+
+          if (deleteError) {
+            console.warn('Не удалось удалить ссылку клиента при отзыве доступа организации:', deleteError)
+          }
+        } catch (error) {
+          console.warn('Не удалось очистить ссылку клиента при удалении доступа организации', error)
+        }
+        setOrganizationClientLink(null)
+        setAttachedClient(null)
+      }
+
+      alert('Доступ успешно отозван')
+    } catch (error) {
+      console.error('Ошибка отзыва доступа:', error)
+      alert('Не удалось отозвать доступ. Попробуйте позже.')
     }
-
-    alert('Доступ успешно отозван')
   }
 
   useEffect(() => {
     if (!user) {
       const clientInviteToken = searchParams.get('client')
+      const accessToken = searchParams.get('access')
+      
       if (clientInviteToken) {
         navigate(`/client-invite?diary=${id}&token=${clientInviteToken}`, { replace: true })
+      } else if (accessToken) {
+        // Регистрируем попытку принять приглашение через бэкенд
+        const registerAttempt = async () => {
+          try {
+            await supabase.rpc('register_diary_access_attempt', {
+              p_link_token: accessToken,
+              p_user_id: null,
+              p_user_email: null,
+              p_user_phone: null
+            })
+          } catch (error) {
+            console.error('[DiaryPage] Ошибка регистрации попытки принять приглашение:', error)
+          }
+        }
+        registerAttempt()
+        navigate('/login')
       } else {
         navigate('/login')
       }
       return
     }
 
-    // Загружаем дневник
-    const diaries = JSON.parse(localStorage.getItem('diaries') || '[]')
-    const foundDiary = diaries.find((d: Diary) => d.id === id)
-    
-    if (!foundDiary) {
-      navigate('/dashboard')
-      return
-    }
-    
-    console.log('[DiaryPage] Loaded diary', foundDiary)
-    let normalizedDiary = foundDiary
-    if (!normalizedDiary.organization_type) {
-      const derivedOrgType = organizationType || currentUser.organization_type || null
-      if (derivedOrgType) {
-        normalizedDiary = { ...normalizedDiary, organization_type: derivedOrgType }
-        const updatedList = diaries.map((d: Diary) => (d.id === normalizedDiary.id ? normalizedDiary : d))
-        localStorage.setItem('diaries', JSON.stringify(updatedList))
+    // Загружаем дневник из Supabase
+    const loadDiary = async () => {
+      if (!id) return
+
+      try {
+        const { data: diaryData, error: diaryError } = await supabase
+          .from('diaries')
+          .select('*')
+          .eq('id', id)
+          .single()
+
+        if (diaryError || !diaryData) {
+          console.error('Ошибка загрузки дневника:', diaryError)
+          console.error('Детали ошибки:', {
+            code: diaryError?.code,
+            message: diaryError?.message,
+            details: diaryError?.details,
+            hint: diaryError?.hint,
+            userId: user?.id,
+            userRole: userRole,
+          })
+          
+          // Если ошибка доступа (RLS блокирует), показываем более информативное сообщение
+          if (diaryError?.code === 'PGRST301' || diaryError?.message?.includes('permission') || diaryError?.message?.includes('access')) {
+            console.error('Доступ заблокирован RLS. Проверьте has_diary_access для этого дневника.')
+          }
+          
+          alert('Не удалось загрузить дневник. Попробуйте позже.')
+          navigate('/dashboard')
+          return
+        }
+
+        // Преобразуем данные из Supabase в формат Diary
+        const normalizedDiary: Diary = {
+          id: diaryData.id,
+          owner_id: diaryData.created_by || diaryData.owner_client_id || '',
+          // client_id должен быть owner_client_id (может быть null для организаций)
+          client_id: diaryData.owner_client_id || null,
+          patient_card_id: diaryData.patient_card_id,
+          caregiver_id: diaryData.caregiver_id,
+          organization_id: diaryData.organization_id,
+          organization_type: diaryData.organization_type || organizationType || currentUser.organization_type || null,
+          created_at: diaryData.created_at,
+        }
+
+        setDiary(normalizedDiary)
+
+        // Загружаем информацию об организации, если она привязана к дневнику
+        if (normalizedDiary.organization_id) {
+          try {
+            const { data: orgData, error: orgError } = await supabase
+              .from('organizations')
+              .select('id, name, type')
+              .eq('id', normalizedDiary.organization_id)
+              .single()
+
+            if (!orgError && orgData) {
+              setOrganizationInfo({
+                id: orgData.id,
+                name: orgData.name || 'Организация',
+                type: orgData.type,
+              })
+            } else {
+              setOrganizationInfo(null)
+            }
+          } catch (error) {
+            console.error('Ошибка загрузки информации об организации:', error)
+            setOrganizationInfo(null)
+          }
+        } else {
+          setOrganizationInfo(null)
+        }
+
+        // Загружаем карточку подопечного из Supabase
+        if (normalizedDiary.patient_card_id) {
+          const { data: cardData, error: cardError } = await supabase
+            .from('patient_cards')
+            .select('*')
+            .eq('id', normalizedDiary.patient_card_id)
+            .single()
+
+          if (!cardError && cardData) {
+            const normalizedCard: PatientCard = {
+              id: cardData.id,
+              client_id: cardData.client_id || '',
+              full_name: cardData.full_name,
+              date_of_birth: cardData.date_of_birth,
+              gender: cardData.gender as 'male' | 'female',
+              diagnoses: Array.isArray(cardData.diagnoses) ? cardData.diagnoses : [],
+              mobility: cardData.mobility as 'walks' | 'sits' | 'lies',
+              address: (cardData.metadata as any)?.address || null,
+            }
+            setPatientCard(normalizedCard)
+          } else {
+            console.error('Ошибка загрузки карточки:', cardError)
+            alert('Не удалось загрузить карточку подопечного.')
+          }
+        }
+      } catch (error) {
+        console.error('Ошибка загрузки дневника:', error)
+        navigate('/dashboard')
       }
     }
-    setDiary(normalizedDiary)
 
-    // Загружаем карточку подопечного
-    const cards = JSON.parse(localStorage.getItem('patient_cards') || '[]')
-    const foundCard = cards.find((c: PatientCard) => c.id === normalizedDiary.patient_card_id)
-    
-    if (foundCard) {
-      setPatientCard(foundCard)
-    }
+    loadDiary()
 
     // Загружаем показатели дневника из Supabase
     const loadMetrics = async () => {
@@ -1708,18 +2455,27 @@ export const DiaryPage = () => {
 
         if (metricsError) {
           console.error('Ошибка загрузки метрик:', metricsError)
-          // Fallback на localStorage
-          const allMetrics = JSON.parse(localStorage.getItem('diary_metrics') || '[]')
-          const diaryMetrics = allMetrics.filter((m: DiaryMetric) => m.diary_id === id)
-          setMetrics(diaryMetrics)
+          setMetrics([])
+          setMetricSettings({})
         } else {
-          setMetrics((metricsData || []).map((m: any) => ({
+          const loadedMetrics = (metricsData || []).map((m: any) => ({
             id: m.id,
             diary_id: m.diary_id,
             metric_type: m.metric_key,
             is_pinned: m.is_pinned,
             settings: m.metadata?.settings || undefined,
-          })))
+            metadata: m.metadata || {}, // Сохраняем metadata для доступа к label и category
+          }))
+          setMetrics(loadedMetrics)
+          
+          // Загружаем настройки из metadata.settings каждой метрики
+          const loadedSettings: Record<string, MetricSettings> = {}
+          loadedMetrics.forEach((metric: DiaryMetric) => {
+            if (metric.settings) {
+              loadedSettings[metric.metric_type] = normalizeSettings(metric.settings)
+            }
+          })
+          setMetricSettings(loadedSettings)
         }
       } catch (error) {
         console.error('Ошибка загрузки метрик:', error)
@@ -1731,11 +2487,8 @@ export const DiaryPage = () => {
       if (!id) return
 
       try {
-        // Загружаем историю за сегодня
-        const today = new Date().toISOString().split('T')[0]
-        const historyEntries = await loadDiaryHistoryEntries(id, today)
-
-        // Также загружаем последние значения метрик
+        // Загружаем последние значения метрик из diary_metric_values
+        // Это основной источник данных, diary_history используется только для истории за конкретную дату
         const { data: valuesData, error: valuesError } = await supabase
           .from('diary_metric_values')
           .select('*')
@@ -1745,22 +2498,27 @@ export const DiaryPage = () => {
 
         if (valuesError) {
           console.error('Ошибка загрузки значений метрик:', valuesError)
-          // Fallback на localStorage
-          const allValues = JSON.parse(localStorage.getItem('diary_metric_values') || '[]')
-          const diaryValues = allValues.filter((v: DiaryMetricValue) => v.diary_id === id)
-          setMetricValues(diaryValues)
+          setMetricValues([])
         } else {
           // Преобразуем данные из Supabase в формат DiaryMetricValue
-          const supabaseValues = (valuesData || []).map((v: any) => ({
-            id: v.id,
-            diary_id: v.diary_id,
-            metric_type: v.metric_key,
-            value: v.value,
-            created_at: v.recorded_at || v.created_at,
-          }))
+          const supabaseValues = (valuesData || []).map((v: any) => {
+            // Извлекаем значение из JSONB (может быть объектом { value: ... } или просто значением)
+            let extractedValue = v.value
+            if (v.value && typeof v.value === 'object' && 'value' in v.value) {
+              extractedValue = v.value.value
+            }
+            
+            return {
+              id: v.id,
+              diary_id: v.diary_id,
+              metric_type: v.metric_key,
+              value: extractedValue,
+              created_at: v.recorded_at || v.created_at,
+            }
+          })
 
-          // Объединяем с историей
-          const mergedValues = mergeDiaryEntries([...supabaseValues, ...historyEntries])
+          // Дедуплицируем значения (на случай, если есть дубликаты)
+          const mergedValues = mergeDiaryEntries(supabaseValues)
           setMetricValues(mergedValues)
         }
       } catch (error) {
@@ -1771,122 +2529,243 @@ export const DiaryPage = () => {
     loadMetrics()
     loadMetricValues()
 
-    // Загружаем настройки времени заполнения
-    const rawSettings = JSON.parse(localStorage.getItem('diary_metric_settings') || '{}')
-    const loadedSettings: Record<string, MetricSettings> = {}
+    // Настройки метрик теперь загружаются из diary_metrics.metadata.settings в loadMetrics()
+    // localStorage больше не используется для настроек
 
-    Object.entries(rawSettings).forEach(([key, value]) => {
-      if (!key.startsWith(`${id}_`)) return
-      const metricType = key.slice(`${id}_`.length)
-      loadedSettings[metricType] = normalizeSettings(value)
-    })
-
-    metrics.forEach((metric: DiaryMetric) => {
-      if (!loadedSettings[metric.metric_type] && metric.settings) {
-        loadedSettings[metric.metric_type] = normalizeSettings(metric.settings)
-      }
-    })
-
-    if (Object.keys(loadedSettings).length > 0) {
-      const persistedSettings = JSON.parse(localStorage.getItem('diary_metric_settings') || '{}')
-      let shouldPersist = false
-      Object.entries(loadedSettings).forEach(([metricType, settings]) => {
-        const key = `${id}_${metricType}`
-        if (!persistedSettings[key]) {
-          persistedSettings[key] = settings
-          shouldPersist = true
-        }
-      })
-      if (shouldPersist) {
-        localStorage.setItem('diary_metric_settings', JSON.stringify(persistedSettings))
-      }
-    }
-
-    setMetricSettings(loadedSettings)
     setCurrentTime(new Date())
   }, [id, user, navigate, searchParams])
 
+  // Обработка токена доступа к дневнику (через параметр access в URL)
+  useEffect(() => {
+    if (!id || !user) return
+
+    const accessToken = searchParams.get('access')
+    if (!accessToken) return
+
+    const handleDiaryAccessToken = async () => {
+      try {
+        console.log('[DiaryPage] Обработка токена доступа к дневнику:', accessToken)
+        
+        // Проверяем, что пользователь - организация, сиделка или сотрудник организации
+        const userRole = user.user_metadata?.user_role || user.user_metadata?.role
+        const organizationType = user.user_metadata?.organization_type
+        
+        // Разрешаем обработку для организаций, сиделок и сотрудников организаций
+        // ВАЖНО: Для сиделок проверяем organizationType, даже если роль еще не установлена
+        const isCaregiver = organizationType === 'caregiver'
+        const isOrganization = userRole === 'organization' || userRole === 'org_employee'
+        
+        if (!isOrganization && !isCaregiver) {
+          console.log('[DiaryPage] Пользователь не является организацией, сиделкой или сотрудником, пропускаем обработку токена')
+          // Если это сиделка, которая еще не создала организацию, регистрируем попытку для обработки после создания профиля
+          if (organizationType === 'caregiver') {
+            console.log('[DiaryPage] Сиделка еще не создала организацию, регистрируем попытку для обработки после создания профиля')
+            try {
+              await supabase.rpc('register_diary_access_attempt', {
+                p_link_token: accessToken,
+                p_user_id: user.id,
+                p_user_email: user.email || null,
+                p_user_phone: user.user_metadata?.phone || null
+              })
+            } catch (error) {
+              console.error('[DiaryPage] Ошибка регистрации попытки:', error)
+            }
+            // Редиректим на страницу настройки профиля, если она еще не заполнена
+            navigate('/profile/setup', { replace: true })
+          }
+          return
+        }
+
+        // Вызываем RPC функцию для привязки дневника
+        const { data, error } = await supabase.rpc('accept_diary_access_token', {
+          p_link_token: accessToken
+        })
+
+        if (error) {
+          console.error('[DiaryPage] Ошибка привязки дневника по токену:', error)
+          
+          // Если ошибка связана с тем, что организация не найдена, регистрируем попытку для обработки после создания профиля
+          if (error.message?.includes('Организация не найдена') || error.message?.includes('не удалось определить организацию')) {
+            console.log('[DiaryPage] Организация не найдена, регистрируем попытку для обработки после создания профиля')
+            try {
+              await supabase.rpc('register_diary_access_attempt', {
+                p_link_token: accessToken,
+                p_user_id: user.id,
+                p_user_email: user.email || null,
+                p_user_phone: user.user_metadata?.phone || null
+              })
+            } catch (regError) {
+              console.error('[DiaryPage] Ошибка регистрации попытки:', regError)
+            }
+            navigate('/profile/setup', { replace: true })
+            return
+          }
+          
+          alert('Ошибка привязки дневника: ' + error.message)
+          return
+        }
+
+        if (data?.success) {
+          console.log('[DiaryPage] Дневник успешно привязан:', data)
+          
+          // Инвалидируем кэш запросов для dashboard, чтобы дневник появился в списке
+          await queryClient.invalidateQueries({ queryKey: ['dashboard-diaries'] })
+          
+          // Перенаправляем на dashboard, чтобы дневник появился в списке
+          alert('Доступ к дневнику получен! Дневник добавлен в ваш список.')
+          navigate('/dashboard', { replace: true })
+        } else {
+          console.error('[DiaryPage] Ошибка привязки дневника:', data?.error)
+          
+          // Если ошибка связана с тем, что организация не найдена, регистрируем попытку для обработки после создания профиля
+          if (data?.error?.includes('Организация не найдена') || data?.error?.includes('не удалось определить организацию')) {
+            console.log('[DiaryPage] Организация не найдена, регистрируем попытку для обработки после создания профиля')
+            try {
+              await supabase.rpc('register_diary_access_attempt', {
+                p_link_token: accessToken,
+                p_user_id: user.id,
+                p_user_email: user.email || null,
+                p_user_phone: user.user_metadata?.phone || null
+              })
+            } catch (error) {
+              console.error('[DiaryPage] Ошибка регистрации попытки:', error)
+            }
+            navigate('/profile/setup', { replace: true })
+            return
+          }
+          
+          alert('Ошибка привязки дневника: ' + (data?.error || 'Неизвестная ошибка'))
+        }
+      } catch (error) {
+        console.error('[DiaryPage] Ошибка обработки токена доступа:', error)
+        alert('Ошибка обработки токена доступа')
+      }
+    }
+
+    handleDiaryAccessToken()
+  }, [id, user, searchParams, navigate])
+
+  // Обработка принятия приглашения клиентом (через параметр client в URL)
   useEffect(() => {
     if (!id || !user || !diary) return
 
     const clientToken = searchParams.get('client')
     if (!clientToken) return
 
-    let storedLinksRaw: string | null = null
-    let storedLinks: Record<string, DiaryClientLink> = {}
+    const handleClientAccept = async () => {
+      try {
+        // Проверяем приглашение через таблицу diary_client_links
+        const { data: clientLink, error: linkError } = await supabase
+          .from('diary_client_links')
+          .select('*')
+          .eq('diary_id', id)
+          .eq('token', clientToken)
+          .maybeSingle()
 
-    try {
-      storedLinksRaw = localStorage.getItem('diary_client_links')
-      storedLinks = storedLinksRaw
-        ? (JSON.parse(storedLinksRaw) as Record<string, DiaryClientLink>)
-        : {}
-    } catch (error) {
-      console.warn('Не удалось прочитать diary_client_links для принятия доступа', error)
-      storedLinks = {}
+        if (linkError) {
+          console.error('Ошибка проверки приглашения:', linkError)
+          alert('Ошибка проверки ссылки приглашения')
+          navigate(`/diaries/${id}`, { replace: true })
+          return
+        }
+
+        if (!clientLink) {
+          alert('Ссылка приглашения недействительна или устарела')
+          navigate(`/diaries/${id}`, { replace: true })
+          return
+        }
+
+        // Проверяем, не использована ли ссылка другим пользователем
+        if (clientLink.accepted_by && clientLink.accepted_by !== user.id) {
+          alert('Эта ссылка уже была использована другим пользователем')
+          navigate(`/diaries/${id}`, { replace: true })
+          return
+        }
+
+        // Получаем client_id из таблицы clients
+        const { data: clientData, error: clientError } = await supabase
+          .from('clients')
+          .select('id')
+          .eq('user_id', user.id)
+          .single()
+
+        if (clientError || !clientData) {
+          alert('Ошибка: не удалось определить клиента')
+          navigate(`/diaries/${id}`, { replace: true })
+          return
+        }
+
+        const clientId = clientData.id
+
+        // Обновляем запись в diary_client_links
+        // Теперь PRIMARY KEY только на diary_id, поэтому используем только diary_id для обновления
+        const { error: updateError } = await supabase
+          .from('diary_client_links')
+          .update({
+            client_id: clientId,
+            accepted_by: user.id,
+            accepted_at: new Date().toISOString(),
+          })
+          .eq('diary_id', id)
+          .eq('token', clientToken) // Дополнительная проверка по токену для безопасности
+
+        if (updateError) {
+          console.error('Ошибка обновления diary_client_links:', updateError)
+          alert('Ошибка при принятии приглашения')
+          navigate(`/diaries/${id}`, { replace: true })
+          return
+        }
+
+        // Edge Function уже обновил diaries.owner_client_id и patient_cards.client_id при регистрации
+        // Перезагружаем данные дневника и карточки
+        const { data: updatedDiary, error: diaryError } = await supabase
+          .from('diaries')
+          .select('*')
+          .eq('id', id)
+          .single()
+
+        if (!diaryError && updatedDiary) {
+          setDiary(updatedDiary as any)
+        }
+
+        if (updatedDiary?.patient_card_id) {
+          const { data: updatedCard, error: cardError } = await supabase
+            .from('patient_cards')
+            .select('*')
+            .eq('id', updatedDiary.patient_card_id)
+            .single()
+
+          if (!cardError && updatedCard) {
+            setPatientCard(updatedCard as PatientCard)
+          }
+        }
+
+        // Обновляем состояние ссылки
+        const normalizedLink: DiaryClientLink = {
+          link: `${appOrigin}/client-invite?diary=${id}&token=${clientToken}`,
+          created_at: clientLink.accepted_at || new Date().toISOString(),
+          token: clientToken,
+          diary_id: id,
+          patient_card_id: diary.patient_card_id,
+          organization_id: diary.organization_id ?? effectiveOrganizationId ?? null,
+          accepted_by: user.id,
+          accepted_at: new Date().toISOString(),
+          client_id: clientId,
+        }
+
+        setOrganizationClientLink(normalizedLink)
+        updateAttachedClientInfo(normalizedLink)
+
+        alert('Дневник успешно привязан к вашему аккаунту. Вы можете управлять доступом и делиться дневником со специалистами.')
+        navigate(`/diaries/${id}`, { replace: true })
+      } catch (error) {
+        console.error('Ошибка при принятии приглашения:', error)
+        alert('Ошибка при принятии приглашения')
+        navigate(`/diaries/${id}`, { replace: true })
+      }
     }
 
-    const linkEntryRaw = storedLinks?.[id]
-    const linkEntry = normalizeClientLink(linkEntryRaw, {
-      diaryId: id,
-      patientCardId: diary.patient_card_id ?? null,
-      organizationId: diary.organization_id ?? effectiveOrganizationId ?? null,
-    })
-
-    if (!linkEntry) {
-      alert('Ссылка приглашения недействительна или устарела')
-      navigate(`/diaries/${id}`, { replace: true })
-      return
-    }
-
-    if (linkEntry.token !== clientToken) {
-      alert('Ссылка приглашения недействительна')
-      navigate(`/diaries/${id}`, { replace: true })
-      return
-    }
-
-    if (linkEntry.accepted_by && linkEntry.accepted_by !== user.id) {
-      alert('Эта ссылка уже была использована другим пользователем')
-      navigate(`/diaries/${id}`, { replace: true })
-      return
-    }
-
-    const { diary: updatedDiary, patientCard: updatedCard } = attachClientToDiary({
-      diaryId: id,
-      clientId: user.id,
-    })
-
-    if (!updatedDiary) {
-      alert('Дневник не найден или уже удалён')
-      navigate('/dashboard', { replace: true })
-      return
-    }
-
-    setDiary(updatedDiary)
-
-    if (updatedCard) {
-      setPatientCard(updatedCard as PatientCard)
-    }
-
-    const normalizedLink = {
-      ...linkEntry,
-      accepted_by: user.id,
-      accepted_at: new Date().toISOString(),
-      diary_id: id,
-      patient_card_id: updatedDiary.patient_card_id,
-      organization_id: updatedDiary.organization_id,
-    }
-
-    const nextLinks = {
-      ...storedLinks,
-      [id]: normalizedLink,
-    }
-
-    localStorage.setItem('diary_client_links', JSON.stringify(nextLinks))
-    setOrganizationClientLink(normalizedLink)
-    updateAttachedClientInfo(normalizedLink)
-
-    alert('Дневник успешно привязан к вашему аккаунту. Вы можете управлять доступом и делиться дневником со специалистами.')
-    navigate(`/diaries/${id}`, { replace: true })
+    handleClientAccept()
   }, [id, user, diary, searchParams, navigate, effectiveOrganizationId])
 
   const toggleSection = (section: string) => {
@@ -1899,26 +2778,76 @@ export const DiaryPage = () => {
   // Разделяем показатели на закрепленные и остальные
   // Отображаем только те показатели, которые были выбраны при создании дневника
   const pinnedMetrics = metrics.filter(m => m.is_pinned)
+  
+  // Вспомогательная функция для определения категории показателя
+  const getMetricCategory = (metricType: string): string | null => {
+    if (metricType.startsWith('custom_')) {
+      const metric = metrics.find(m => m.metric_type === metricType)
+      if (metric) {
+        const metadata = (metric as any)?.metadata || {}
+        return metadata.category || null
+      }
+      // Fallback: определяем по префиксу
+      if (metricType.startsWith('custom_care_')) return 'care'
+      if (metricType.startsWith('custom_physical_')) return 'physical'
+      if (metricType.startsWith('custom_excretion_')) return 'excretion'
+      if (metricType.startsWith('custom_symptom_')) return 'symptom'
+    }
+    if (['walk', 'cognitive_games', 'diaper_change', 'hygiene', 'skin_moisturizing', 'meal', 'medications', 'vitamins', 'sleep'].includes(metricType)) {
+      return 'care'
+    }
+    if (['temperature', 'blood_pressure', 'breathing_rate', 'pain_level', 'saturation', 'blood_sugar'].includes(metricType)) {
+      return 'physical'
+    }
+    if (['urination', 'defecation'].includes(metricType)) {
+      return 'excretion'
+    }
+    if (['nausea', 'vomiting', 'shortness_of_breath', 'itching', 'cough', 'dry_mouth', 'hiccups', 'taste_disturbance'].includes(metricType)) {
+      return 'symptom'
+    }
+    return null
+  }
+
   const careMetrics = metrics.filter(
-    m =>
-      !m.is_pinned &&
-      ['walk', 'cognitive_games', 'diaper_change', 'hygiene', 'skin_moisturizing', 'meal', 'medications', 'vitamins', 'sleep'].includes(m.metric_type)
+    m => !m.is_pinned && getMetricCategory(m.metric_type) === 'care'
   )
   const physicalMetrics = metrics.filter(
-    m =>
-      !m.is_pinned &&
-      ['temperature', 'blood_pressure', 'breathing_rate', 'pain_level', 'saturation', 'blood_sugar'].includes(m.metric_type)
+    m => !m.is_pinned && getMetricCategory(m.metric_type) === 'physical'
   )
   const excretionMetrics = metrics.filter(
-    m => !m.is_pinned && ['urination', 'defecation'].includes(m.metric_type)
+    m => !m.is_pinned && getMetricCategory(m.metric_type) === 'excretion'
   )
   const symptomMetrics = metrics.filter(
-    m =>
-      !m.is_pinned &&
-      ['nausea', 'vomiting', 'shortness_of_breath', 'itching', 'cough', 'dry_mouth', 'hiccups', 'taste_disturbance'].includes(m.metric_type)
+    m => !m.is_pinned && getMetricCategory(m.metric_type) === 'symptom'
   )
 
   const getMetricLabel = (metricType: string): string => {
+    // Проверяем, является ли это пользовательским показателем
+    // Если да, пытаемся получить label из metadata метрики
+    if (metricType.startsWith('custom_')) {
+      const metric = metrics.find(m => m.metric_type === metricType)
+      if (metric) {
+        const metadata = (metric as any).metadata || {}
+        if (metadata.label) {
+          return metadata.label
+        }
+        // Если label не найден в metadata, извлекаем из metricType
+        const label = metricType
+          .replace('custom_care_', '')
+          .replace('custom_physical_', '')
+          .replace('custom_excretion_', '')
+          .replace('custom_symptom_', '')
+        return label || metricType
+      }
+      // Fallback: извлекаем label из metricType
+      const label = metricType
+        .replace('custom_care_', '')
+        .replace('custom_physical_', '')
+        .replace('custom_excretion_', '')
+        .replace('custom_symptom_', '')
+      return label || metricType
+    }
+
     const labels: Record<string, string> = {
       // Уход
       walk: 'Прогулка',
@@ -2027,8 +2956,8 @@ export const DiaryPage = () => {
     if (!selectedDate) return []
     const targetDate = fromInputDate(selectedDate)
     
-    // Объединяем данные из Supabase и локальные значения
-    const allEntries = [...metricValues, ...historyForDate]
+    // Объединяем и дедуплицируем данные из Supabase и локальные значения
+    const allEntries = mergeDiaryEntries([...metricValues, ...historyForDate])
     
     return allEntries
       .filter(entry => {
@@ -2039,7 +2968,7 @@ export const DiaryPage = () => {
           entryDate.getDate() === targetDate.getDate()
         )
       })
-      .map(entry => {
+      .map((entry, index) => {
         let time = new Date(entry.created_at).toLocaleTimeString('ru-RU', {
           hour: '2-digit',
           minute: '2-digit',
@@ -2062,14 +2991,18 @@ export const DiaryPage = () => {
           displayValue = `${entry.value}`
         }
 
+        // Создаем уникальный ключ для каждой записи
+        const uniqueKey = `${entry.id}_${entry.metric_type}_${entry.created_at}_${index}`
+        
         return {
           ...entry,
           label: getMetricLabel(entry.metric_type),
           time,
           displayValue,
+          uniqueKey, // Добавляем уникальный ключ для рендеринга
         }
       })
-  }, [metricValues, selectedDate])
+  }, [metricValues, historyForDate, selectedDate])
 
   const groupedHistoryEntries = useMemo(() => {
     const groups: Record<
@@ -2328,19 +3261,7 @@ export const DiaryPage = () => {
 
       if (error) {
         console.error('Ошибка сохранения метрики:', error)
-        // Fallback на localStorage
-        const entry: DiaryMetricValue = {
-          id: `value_${Date.now()}`,
-          diary_id: id,
-          metric_type: metricType,
-          value,
-          created_at: new Date().toISOString(),
-        }
-        const storedValues = JSON.parse(localStorage.getItem('diary_metric_values') || '[]')
-        const mergedStoredValues = mergeDiaryEntries([...storedValues, entry])
-        localStorage.setItem('diary_metric_values', JSON.stringify(mergedStoredValues))
-        const mergedHistoryValues = mergeDiaryEntries([...metricValues, entry])
-        setMetricValues(mergedHistoryValues)
+        alert('Не удалось сохранить значение метрики. Попробуйте позже.')
         return
       }
 
@@ -2355,42 +3276,140 @@ export const DiaryPage = () => {
 
       const mergedHistoryValues = mergeDiaryEntries([...metricValues, entry])
       setMetricValues(mergedHistoryValues)
+      
+      // Перезагружаем значения из Supabase для синхронизации
+      setTimeout(async () => {
+        try {
+          const today = new Date().toISOString().split('T')[0]
+          const historyEntries = await loadDiaryHistoryEntries(id!, today)
+          
+          const { data: valuesData, error: valuesError } = await supabase
+            .from('diary_metric_values')
+            .select('*')
+            .eq('diary_id', id)
+            .order('recorded_at', { ascending: false })
+            .limit(100)
+
+          if (!valuesError && valuesData) {
+            const supabaseValues = (valuesData || []).map((v: any) => {
+              let extractedValue = v.value
+              if (v.value && typeof v.value === 'object' && 'value' in v.value) {
+                extractedValue = v.value.value
+              }
+              
+              return {
+                id: v.id,
+                diary_id: v.diary_id,
+                metric_type: v.metric_key,
+                value: extractedValue,
+                created_at: v.recorded_at || v.created_at,
+              }
+            })
+
+            const mergedValues = mergeDiaryEntries([...supabaseValues, ...historyEntries])
+            setMetricValues(mergedValues)
+          }
+        } catch (error) {
+          console.error('Ошибка перезагрузки значений:', error)
+        }
+      }, 500)
     } catch (error) {
       console.error('Ошибка сохранения метрики:', error)
     }
   }
 
-  const persistOrganizationLink = (data: DiaryClientLink) => {
-    if (!id) return
-    const normalized = normalizeClientLink(data, {
-      diaryId: id,
-      patientCardId: diary?.patient_card_id ?? null,
-      organizationId: diary?.organization_id ?? effectiveOrganizationId ?? null,
-    })
-    if (!normalized) return
-    const stored = JSON.parse(localStorage.getItem('diary_client_links') || '{}')
-    stored[id] = normalized
-    localStorage.setItem('diary_client_links', JSON.stringify(stored))
-    setOrganizationClientLink(normalized)
-    updateAttachedClientInfo(normalized)
-  }
-
-  const handleCreateOrganizationLink = () => {
-    if (!id) return
-    const token = crypto.randomUUID()
-    const link = `${appOrigin}/client-invite?diary=${id}&token=${token}`
-    const data: DiaryClientLink = {
-      link,
-      created_at: new Date().toISOString(),
-      token,
-      diary_id: id,
-      patient_card_id: diary?.patient_card_id ?? null,
-      organization_id: diary?.organization_id ?? effectiveOrganizationId ?? null,
-      accepted_by: null,
-      accepted_at: null,
+  const handleCreateOrganizationLink = async () => {
+    if (!id || !diary?.patient_card_id) {
+      alert('Не удалось создать ссылку: отсутствует карточка подопечного')
+      return
     }
-    persistOrganizationLink(data)
-    setAttachedClient(null)
+
+    try {
+      // Используем RPC для создания приглашения клиента
+      const { data: inviteData, error: inviteError } = await supabase.rpc('generate_invite_link', {
+        invite_type: 'organization_client',
+        payload: {
+          patient_card_id: diary.patient_card_id,
+          diary_id: id,
+        },
+      })
+
+      if (inviteError) {
+        console.error('Ошибка создания приглашения клиента:', inviteError)
+        alert('Ошибка создания ссылки: ' + inviteError.message)
+        return
+      }
+
+      if (!inviteData || !inviteData.token) {
+        alert('Ошибка создания ссылки: токен не получен')
+        return
+      }
+
+      // Создаем или обновляем запись в diary_client_links для отслеживания статуса
+      // Теперь PRIMARY KEY только на diary_id, поэтому можно использовать upsert
+      const { error: linkError } = await supabase
+        .from('diary_client_links')
+        .upsert({
+          diary_id: id,
+          client_id: null, // Будет заполнено при принятии приглашения
+          token: inviteData.token,
+          accepted_by: null,
+          accepted_at: null,
+        }, {
+          onConflict: 'diary_id',
+        })
+
+      if (linkError) {
+        console.error('Ошибка создания записи в diary_client_links:', linkError)
+        // Не прерываем выполнение, так как приглашение уже создано
+      }
+
+      // Формируем ссылку для клиента
+      const link = `${appOrigin}/client-invite?diary=${id}&token=${inviteData.token}`
+      
+      // Обновляем состояние
+      const normalized: DiaryClientLink = {
+        link,
+        created_at: inviteData.created_at || new Date().toISOString(),
+        token: inviteData.token,
+        diary_id: id,
+        patient_card_id: diary.patient_card_id,
+        organization_id: diary?.organization_id ?? effectiveOrganizationId ?? null,
+        accepted_by: null,
+        accepted_at: null,
+      }
+
+      setOrganizationClientLink(normalized)
+      setAttachedClient(null)
+
+      // Перезагружаем ссылки из БД
+      const { data: clientLink } = await supabase
+        .from('diary_client_links')
+        .select('*')
+        .eq('diary_id', id)
+        .maybeSingle()
+
+      if (clientLink) {
+        const updated: DiaryClientLink = {
+          ...normalized,
+          accepted_by: clientLink.accepted_by,
+          accepted_at: clientLink.accepted_at,
+          client_id: clientLink.client_id,
+        }
+        setOrganizationClientLink(updated)
+        updateAttachedClientInfo(updated)
+      }
+      
+      // Перезагружаем список приглашенных клиентов после создания ссылки
+      // Используем setTimeout, чтобы дать время базе данных обновиться
+      setTimeout(() => {
+        // Триггерим перезагрузку через изменение зависимости в useEffect
+        // Это произойдет автоматически, так как organizationClientLink изменится
+      }, 500)
+    } catch (error) {
+      console.error('Ошибка создания ссылки для клиента:', error)
+      alert('Ошибка создания ссылки')
+    }
   }
 
   const handleCopyLink = async (link: string) => {
@@ -2409,29 +3428,73 @@ export const DiaryPage = () => {
     window.open(url, '_blank', 'noopener,noreferrer')
   }
 
-  const persistExternalLinks = (links: Array<{ id: string; link: string; created_at: string }>) => {
+  const handleCreateExternalLink = async () => {
+    if (!id || !user) return
+
+    try {
+      const token = crypto.randomUUID()
+      const link = `${appOrigin}/diaries/${id}?access=${token}`
+
+      // Создаем запись в diary_external_access_links
+      const { data: newLink, error: createError } = await supabase
+        .from('diary_external_access_links')
+        .insert({
+          diary_id: id,
+          link_token: token,
+          created_by: user.id,
+        })
+        .select()
+        .single()
+
+      if (createError) {
+        console.error('Ошибка создания внешней ссылки:', createError)
+        alert('Ошибка создания ссылки: ' + createError.message)
+        return
+      }
+
+      // Обновляем состояние
+      const entry = {
+        id: newLink.id,
+        token: newLink.link_token,
+        link,
+        invited_email: newLink.invited_email || null,
+        invited_phone: newLink.invited_phone || null,
+        expires_at: newLink.expires_at || null,
+        created_at: newLink.created_at,
+      }
+      setExternalAccessLinks([...externalAccessLinks, entry])
+    } catch (error) {
+      console.error('Ошибка создания внешней ссылки:', error)
+      alert('Ошибка создания ссылки')
+    }
+  }
+
+  const handleRevokeExternalLink = async (linkId: string) => {
     if (!id) return
-    const stored = JSON.parse(localStorage.getItem('diary_external_access_links') || '{}')
-    stored[id] = links
-    localStorage.setItem('diary_external_access_links', JSON.stringify(stored))
-    setExternalAccessLinks(links)
+
+    try {
+      // Отзываем ссылку (устанавливаем revoked_at)
+      const { error: revokeError } = await supabase
+        .from('diary_external_access_links')
+        .update({ revoked_at: new Date().toISOString() })
+        .eq('id', linkId)
+        .eq('diary_id', id)
+
+      if (revokeError) {
+        console.error('Ошибка отзыва внешней ссылки:', revokeError)
+        alert('Ошибка отзыва ссылки: ' + revokeError.message)
+        return
+      }
+
+      // Обновляем состояние (убираем отозванную ссылку)
+      setExternalAccessLinks(externalAccessLinks.filter(item => item.id !== linkId))
+    } catch (error) {
+      console.error('Ошибка отзыва внешней ссылки:', error)
+      alert('Ошибка отзыва ссылки')
+    }
   }
 
-  const handleCreateExternalLink = () => {
-    if (!id) return
-    const token = crypto.randomUUID()
-    const link = `${appOrigin}/diaries/${id}?access=${token}`
-    const entry = { id: token, link, created_at: new Date().toISOString() }
-    const next = [...externalAccessLinks, entry]
-    persistExternalLinks(next)
-  }
-
-  const handleRevokeExternalLink = (linkId: string) => {
-    const next = externalAccessLinks.filter(item => item.id !== linkId)
-    persistExternalLinks(next)
-  }
-
-  const handleSaveMetric = (metricType: string, data: MetricFillData) => {
+  const handleSaveMetric = async (metricType: string, data: MetricFillData) => {
     if (!id) return
 
     // Сохранение значения показателя
@@ -2443,17 +3506,35 @@ export const DiaryPage = () => {
     let newValue: DiaryMetricValue | null = null
 
     if (shouldPersistValue) {
-      newValue = {
-        id: `value_${Date.now()}`,
-        diary_id: id,
-        metric_type: metricType,
-        value: data.value,
-        created_at: new Date().toISOString(),
-      }
+      // Сохраняем значение через RPC save_metric_value
+      try {
+        const { data: savedData, error: saveError } = await supabase.rpc('save_metric_value', {
+          p_diary_id: id,
+          p_metric_key: metricType,
+          p_value: typeof data.value === 'object' ? data.value : { value: data.value },
+          p_recorded_at: new Date().toISOString(),
+          p_metadata: {},
+        })
 
-      const allValues = JSON.parse(localStorage.getItem('diary_metric_values') || '[]')
-      const mergedValues = mergeDiaryEntries([...allValues, newValue])
-      localStorage.setItem('diary_metric_values', JSON.stringify(mergedValues))
+        if (saveError) {
+          console.error('Ошибка сохранения значения метрики:', saveError)
+          alert('Не удалось сохранить значение метрики. Попробуйте позже.')
+          return
+        }
+
+        // Создаем объект для локального состояния
+        newValue = {
+          id: savedData?.id || `value_${Date.now()}`,
+          diary_id: id,
+          metric_type: metricType,
+          value: typeof data.value === 'object' ? (data.value as any).value : data.value,
+          created_at: savedData?.recorded_at || new Date().toISOString(),
+        }
+      } catch (error) {
+        console.error('Ошибка сохранения значения метрики:', error)
+        alert('Не удалось сохранить значение метрики. Попробуйте позже.')
+        return
+      }
     }
 
     // Сохранение настроек частоты и напоминаний
@@ -2464,39 +3545,93 @@ export const DiaryPage = () => {
       times: data.times,
     }
     
-    const allSettings = JSON.parse(localStorage.getItem('diary_metric_settings') || '{}')
-    allSettings[`${id}_${metricType}`] = settings
-    localStorage.setItem('diary_metric_settings', JSON.stringify(allSettings))
-
+    // Сохраняем настройки в diary_metrics.metadata.settings через Supabase
     try {
-      const allMetrics = JSON.parse(localStorage.getItem('diary_metrics') || '[]') as DiaryMetric[]
-      let shouldUpdateMetrics = false
-      const updatedMetrics = allMetrics.map(metric => {
-        if (metric.diary_id === id && metric.metric_type === metricType) {
-          shouldUpdateMetrics = true
-          return {
-            ...metric,
-            settings: normalizeSettings(settings),
-          }
+      // Находим метрику в Supabase
+      const { data: existingMetric, error: findError } = await supabase
+        .from('diary_metrics')
+        .select('id, metadata')
+        .eq('diary_id', id)
+        .eq('metric_key', metricType)
+        .maybeSingle()
+
+      if (findError && findError.code !== 'PGRST116') {
+        console.error('Ошибка поиска метрики для сохранения настроек:', findError)
+      } else if (existingMetric) {
+        // Обновляем metadata.settings для существующей метрики
+        const currentMetadata = (existingMetric.metadata as any) || {}
+        const updatedMetadata = {
+          ...currentMetadata,
+          settings: normalizeSettings(settings),
         }
-        return metric
-      })
-      if (shouldUpdateMetrics) {
-        localStorage.setItem('diary_metrics', JSON.stringify(updatedMetrics))
-        setMetrics(updatedMetrics.filter(metric => metric.diary_id === id))
+
+        const { error: updateError } = await supabase
+          .from('diary_metrics')
+          .update({ metadata: updatedMetadata })
+          .eq('id', existingMetric.id)
+
+        if (updateError) {
+          console.error('Ошибка сохранения настроек метрики:', updateError)
+          alert('Не удалось сохранить настройки метрики. Попробуйте позже.')
+        } else {
+          // Обновляем локальное состояние метрик
+          setMetrics(prev => prev.map(m => 
+            m.metric_type === metricType 
+              ? { ...m, settings: normalizeSettings(settings) }
+              : m
+          ))
+        }
+      } else {
+        // Метрика не найдена - создаем новую запись (это не должно происходить, но на всякий случай)
+        console.warn('Метрика не найдена для сохранения настроек:', metricType)
+        alert('Метрика не найдена. Сначала добавьте метрику в дневник.')
       }
     } catch (error) {
-      console.warn('Не удалось обновить настройки закрепленного показателя в diary_metrics', error)
+      console.error('Ошибка сохранения настроек метрики:', error)
+      alert('Не удалось сохранить настройки метрики. Попробуйте позже.')
     }
 
     // Обновление состояния
     if (shouldPersistValue && newValue) {
       const mergedHistory = mergeDiaryEntries([...metricValues, newValue])
       setMetricValues(mergedHistory)
-      persistDiaryHistoryEntries(
-        id,
-        mergedHistory.filter(entry => entry.diary_id === id)
-      )
+      
+      // Перезагружаем значения из Supabase для синхронизации
+      setTimeout(async () => {
+        try {
+          const today = new Date().toISOString().split('T')[0]
+          const historyEntries = await loadDiaryHistoryEntries(id!, today)
+          
+          const { data: valuesData, error: valuesError } = await supabase
+            .from('diary_metric_values')
+            .select('*')
+            .eq('diary_id', id)
+            .order('recorded_at', { ascending: false })
+            .limit(100)
+
+          if (!valuesError && valuesData) {
+            const supabaseValues = (valuesData || []).map((v: any) => {
+              let extractedValue = v.value
+              if (v.value && typeof v.value === 'object' && 'value' in v.value) {
+                extractedValue = v.value.value
+              }
+              
+              return {
+                id: v.id,
+                diary_id: v.diary_id,
+                metric_type: v.metric_key,
+                value: extractedValue,
+                created_at: v.recorded_at || v.created_at,
+              }
+            })
+
+            const mergedValues = mergeDiaryEntries([...supabaseValues, ...historyEntries])
+            setMetricValues(mergedValues)
+          }
+        } catch (error) {
+          console.error('Ошибка перезагрузки значений:', error)
+        }
+      }, 500)
     }
     setMetricSettings(prev => ({
       ...prev,
@@ -2610,7 +3745,7 @@ export const DiaryPage = () => {
     }
   }
 
-  const handleSaveMetricsDraft = () => {
+  const handleSaveMetricsDraft = async () => {
     if (!canManageMetricsSettings || !id) return
     setSettingsError(null)
 
@@ -2631,61 +3766,154 @@ export const DiaryPage = () => {
 
     setIsSavingMetrics(true)
     try {
-      const existingMetrics = JSON.parse(localStorage.getItem('diary_metrics') || '[]') as DiaryMetric[]
-      const existingMap = new Map(metrics.map(metric => [metric.metric_type, metric]))
-      const newMetrics: DiaryMetric[] = []
+      // Загружаем существующие метрики из Supabase
+      const { data: existingMetricsData, error: loadError } = await supabase
+        .from('diary_metrics')
+        .select('*')
+        .eq('diary_id', id)
 
+      if (loadError) {
+        console.error('Ошибка загрузки метрик:', loadError)
+        setSettingsError('Не удалось загрузить показатели')
+        setIsSavingMetrics(false)
+        return
+      }
+
+      const existingMap = new Map(metrics.map(metric => [metric.metric_type, metric]))
+      const existingSupabaseMap = new Map(
+        (existingMetricsData || []).map((m: any) => [m.metric_key, m])
+      )
+
+      // Определяем метрики для создания/обновления/удаления
+      const metricsToUpsert: Array<{
+        id?: string
+        diary_id: string
+        metric_key: string
+        is_pinned: boolean
+        metadata?: any
+      }> = []
+
+      // Обрабатываем закрепленные метрики
       normalizedPinned.forEach(type => {
-        const existing = existingMap.get(type)
-        newMetrics.push({
-          id: existing?.id || generateMetricId(),
+        const existing = existingSupabaseMap.get(type)
+        const existingLocal = existingMap.get(type)
+        const settings = existingLocal?.settings || metricSettings[type]
+
+        metricsToUpsert.push({
+          id: existing?.id,
           diary_id: id,
-          metric_type: type,
+          metric_key: type,
           is_pinned: true,
-          settings: existing?.settings || metricSettings[type],
+          metadata: settings ? { settings: normalizeSettings(settings) } : undefined,
         })
       })
 
+      // Обрабатываем незакрепленные метрики
       uniqueSelected
         .filter(type => !normalizedPinned.includes(type))
         .forEach(type => {
-          const existing = existingMap.get(type)
-          newMetrics.push({
-            id: existing?.id || generateMetricId(),
+          const existing = existingSupabaseMap.get(type)
+          const existingLocal = existingMap.get(type)
+          const settings = existingLocal?.settings || metricSettings[type]
+
+          metricsToUpsert.push({
+            id: existing?.id,
             diary_id: id,
-            metric_type: type,
+            metric_key: type,
             is_pinned: false,
-            settings: existing?.settings || metricSettings[type],
+            metadata: settings ? { settings: normalizeSettings(settings) } : undefined,
           })
         })
 
+      // Определяем метрики для удаления
       const removedTypes = metrics
         .map(metric => metric.metric_type)
         .filter(type => !uniqueSelected.includes(type))
 
-      const updatedMetricSettings = { ...metricSettings }
+      // Удаляем метрики из Supabase
       if (removedTypes.length > 0) {
-        const storedSettings = JSON.parse(localStorage.getItem('diary_metric_settings') || '{}')
-        let settingsChanged = false
-        removedTypes.forEach(type => {
-          const key = `${id}_${type}`
-          if (storedSettings[key]) {
-            delete storedSettings[key]
-            settingsChanged = true
-          }
-          if (updatedMetricSettings[type]) {
-            delete updatedMetricSettings[type]
-          }
-        })
-        if (settingsChanged) {
-          localStorage.setItem('diary_metric_settings', JSON.stringify(storedSettings))
+        const { error: deleteError } = await supabase
+          .from('diary_metrics')
+          .delete()
+          .eq('diary_id', id)
+          .in('metric_key', removedTypes)
+
+        if (deleteError) {
+          console.error('Ошибка удаления метрик:', deleteError)
         }
       }
 
-      const remaining = existingMetrics.filter(metric => metric.diary_id !== id)
-      localStorage.setItem('diary_metrics', JSON.stringify([...remaining, ...newMetrics]))
-      setMetrics(newMetrics)
-      setMetricSettings(updatedMetricSettings)
+      // Создаем/обновляем метрики в Supabase
+      const upsertPromises = metricsToUpsert.map(async (metric) => {
+        if (metric.id) {
+          // Обновляем существующую метрику
+          const { error: updateError } = await supabase
+            .from('diary_metrics')
+            .update({
+              is_pinned: metric.is_pinned,
+              metadata: metric.metadata || {},
+            })
+            .eq('id', metric.id)
+
+          if (updateError) {
+            console.error('Ошибка обновления метрики:', updateError)
+          }
+        } else {
+          // Создаем новую метрику
+          const { error: insertError } = await supabase
+            .from('diary_metrics')
+            .insert({
+              diary_id: metric.diary_id,
+              metric_key: metric.metric_key,
+              is_pinned: metric.is_pinned,
+              metadata: metric.metadata || {},
+            })
+
+          if (insertError) {
+            console.error('Ошибка создания метрики:', insertError)
+          }
+        }
+      })
+
+      await Promise.all(upsertPromises)
+
+      // Обновляем локальное состояние
+      const updatedMetricSettings = { ...metricSettings }
+      removedTypes.forEach(type => {
+        if (updatedMetricSettings[type]) {
+          delete updatedMetricSettings[type]
+        }
+      })
+
+      // Перезагружаем метрики из Supabase
+      const { data: reloadedMetrics, error: reloadError } = await supabase
+        .from('diary_metrics')
+        .select('*')
+        .eq('diary_id', id)
+
+      if (!reloadError && reloadedMetrics) {
+        const loadedMetrics = reloadedMetrics.map((m: any) => ({
+          id: m.id,
+          diary_id: m.diary_id,
+          metric_type: m.metric_key,
+          is_pinned: m.is_pinned,
+          settings: m.metadata?.settings || undefined,
+        }))
+        setMetrics(loadedMetrics)
+
+        // Обновляем настройки из метрик
+        const loadedSettings: Record<string, MetricSettings> = {}
+        loadedMetrics.forEach((metric: DiaryMetric) => {
+          if (metric.settings) {
+            loadedSettings[metric.metric_type] = normalizeSettings(metric.settings)
+          }
+        })
+        setMetricSettings({ ...loadedSettings, ...updatedMetricSettings })
+      } else {
+        console.error('Ошибка перезагрузки метрик:', reloadError)
+        alert('Не удалось обновить метрики. Попробуйте обновить страницу.')
+      }
+
       setSettingsMessage('Показатели обновлены')
     } catch (error) {
       console.error('Error updating diary metrics from settings:', error)
@@ -3147,92 +4375,149 @@ export const DiaryPage = () => {
                 </button>
                 {expandedSections.accessManagement && (
                   <div className="px-4 py-3 border-t border-gray-100 space-y-4">
-                    {organizationAccountAccess && !(isOrgEmployee || isCaregiver) ? (
+                    {/* Секция для патронажных агентств - показываем если это патронажное агентство */}
+                    {assignmentOrganizationType === 'patronage_agency' && isOrganizationAccount && (
                       <div className="space-y-3">
-                        {assignmentOrganizationType === 'patronage_agency' ? (
-                          <>
-                            <div>
-                              <p className="text-sm font-semibold text-gray-700 mb-2">
-                                Добавить специалиста
-                              </p>
-                              {availableOrgEmployees.filter(
-                                employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
-                              ).length === 0 ? (
-                                <p className="text-xs text-gray-500">
-                                  Все специалисты уже имеют доступ или отсутствуют в списке.
-                                </p>
-                              ) : (
-                                <div className="flex gap-2">
-                                  <select
-                                    value={selectedEmployeeId}
-                                    onChange={event => setSelectedEmployeeId(event.target.value)}
-                                    className="flex-1 rounded-2xl border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:border-[#7DD3DC] bg-white"
-                                  >
-                                    <option value="">Выберите специалиста</option>
-                                    {availableOrgEmployees
-                                      .filter(
-                                        employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
-                                      )
-                                      .map(employee => (
-                                        <option key={employee.user_id} value={employee.user_id}>
-                                          {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
-                                            employee.user_id}{' '}
-                                          {employee.role ? `(${employee.role})` : ''}
-                                        </option>
-                                      ))}
-                                  </select>
+                        <div>
+                          <p className="text-sm font-semibold text-gray-700 mb-2">
+                            Добавить специалиста
+                          </p>
+                          {availableOrgEmployees.filter(
+                            employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
+                          ).length === 0 ? (
+                            <p className="text-xs text-gray-500">
+                              Все специалисты уже имеют доступ или отсутствуют в списке.
+                            </p>
+                          ) : (
+                            <div className="flex gap-2">
+                              <select
+                                value={selectedEmployeeId}
+                                onChange={event => setSelectedEmployeeId(event.target.value)}
+                                className="flex-1 rounded-2xl border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:border-[#7DD3DC] bg-white"
+                              >
+                                <option value="">Выберите специалиста</option>
+                                {availableOrgEmployees
+                                  .filter(
+                                    employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
+                                  )
+                                  .map(employee => (
+                                    <option key={employee.user_id} value={employee.user_id}>
+                                      {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
+                                        employee.user_id}{' '}
+                                      {employee.role ? `(${employee.role})` : ''}
+                                    </option>
+                                  ))}
+                              </select>
+                              <button
+                                onClick={() => handleAddEmployeeAccess()}
+                                disabled={!selectedEmployeeId}
+                                className="px-4 py-2 rounded-2xl bg-gradient-to-r from-[#7DD3DC] to-[#5CBCC7] text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
+                              >
+                                Добавить
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-gray-700 mb-2">
+                            Специалисты с доступом:
+                          </p>
+                          {assignedEmployeesDisplay.length === 0 ? (
+                            <p className="text-sm text-gray-500">Нет назначенных специалистов</p>
+                          ) : (
+                            <div className="space-y-2">
+                              {assignedEmployeesDisplay.map(employee => (
+                                <div
+                                  key={employee.user_id}
+                                  className="flex items-center justify-between py-2 border-b border-gray-100"
+                                >
+                                  <div>
+                                    <p className="text-sm text-gray-800">
+                                      {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
+                                        employee.user_id}
+                                    </p>
+                                    {employee.role && (
+                                      <p className="text-xs text-gray-500">{employee.role}</p>
+                                    )}
+                                  </div>
                                   <button
-                                    onClick={() => handleAddEmployeeAccess()}
-                                    disabled={!selectedEmployeeId}
-                                    className="px-4 py-2 rounded-2xl bg-gradient-to-r from-[#7DD3DC] to-[#5CBCC7] text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
+                                    onClick={() => handleRemoveEmployeeAccess(employee.user_id)}
+                                    className="text-red-600 hover:text-red-700 text-lg"
+                                    aria-label="Удалить доступ специалиста"
                                   >
-                                    Добавить
+                                    🗑️
                                   </button>
                                 </div>
-                              )}
+                              ))}
                             </div>
-                            <div>
-                              <p className="text-sm font-semibold text-gray-700 mb-2">
-                                Специалисты с доступом:
-                              </p>
-                              {assignedEmployeesDisplay.length === 0 ? (
-                                <p className="text-sm text-gray-500">Нет назначенных специалистов</p>
-                              ) : (
-                                <div className="space-y-2">
-                                  {assignedEmployeesDisplay.map(employee => (
-                                    <div
-                                      key={employee.user_id}
-                                      className="flex items-center justify-between py-2 border-b border-gray-100"
-                                    >
-                                      <div>
-                                        <p className="text-sm text-gray-800">
-                                          {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
-                                            employee.user_id}
-                                        </p>
-                                        {employee.role && (
-                                          <p className="text-xs text-gray-500">{employee.role}</p>
-                                        )}
-                                      </div>
-                                      <button
-                                        onClick={() => handleRemoveEmployeeAccess(employee.user_id)}
-                                        className="text-red-600 hover:text-red-700 text-lg"
-                                        aria-label="Удалить доступ специалиста"
-                                      >
-                                        🗑️
-                                      </button>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </>
-                        ) : availableOrgEmployees.length > 0 ? (
-                          <div>
-                            <p className="text-sm font-semibold text-gray-700 mb-2">
-                              Сотрудники организации
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Секция для пансионатов */}
+                    {assignmentOrganizationType === 'pension' && isOrganizationAccount && availableOrgEmployees.length > 0 && (
+                      <div className="space-y-3">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-700 mb-2">
+                            Добавить специалиста
+                          </p>
+                          {availableOrgEmployees.filter(
+                            employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
+                          ).length === 0 ? (
+                            <p className="text-xs text-gray-500">
+                              Все специалисты уже имеют доступ или отсутствуют в списке.
                             </p>
-                            <div className="space-y-2">
-                              {availableOrgEmployees.map(employee => (
+                          ) : (
+                            <div className="flex gap-2">
+                              <select
+                                value={selectedEmployeeId}
+                                onChange={event => setSelectedEmployeeId(event.target.value)}
+                                className="flex-1 rounded-2xl border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:border-[#7DD3DC] bg-white"
+                              >
+                                <option value="">Выберите специалиста</option>
+                                {availableOrgEmployees
+                                  .filter(
+                                    employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
+                                  )
+                                  .map(employee => (
+                                    <option key={employee.user_id} value={employee.user_id}>
+                                      {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
+                                        employee.user_id}{' '}
+                                      {employee.role ? `(${employee.role})` : ''}
+                                    </option>
+                                  ))}
+                              </select>
+                              <button
+                                onClick={() => handleAddEmployeeAccess()}
+                                disabled={!selectedEmployeeId}
+                                className="px-4 py-2 rounded-2xl bg-gradient-to-r from-[#7DD3DC] to-[#5CBCC7] text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
+                              >
+                                Добавить
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-gray-700 mb-2">
+                            Сотрудники организации
+                          </p>
+                          <div className="space-y-2">
+                            {availableOrgEmployees.map(employee => {
+                              // Для пансионатов: все сотрудники имеют доступ по умолчанию
+                              // "Нет доступа" только если есть запись с revoked_at
+                              let hasAccess = true
+                              if (assignmentOrganizationType === 'pension') {
+                                // Проверяем, не отозван ли доступ явно
+                                const revokedEmployee = assignedEmployees.find(
+                                  (item: any) => item.user_id === employee.user_id && item.revoked_at
+                                )
+                                hasAccess = !revokedEmployee
+                              } else {
+                                // Для патронажных агентств: доступ только если явно назначен
+                                hasAccess = assignedEmployeesDisplay.some(item => item.user_id === employee.user_id)
+                              }
+                              return (
                                 <div
                                   key={`pension-${employee.user_id}`}
                                   className="flex items-center justify-between py-2 border-b border-gray-100"
@@ -3243,34 +4528,43 @@ export const DiaryPage = () => {
                                         employee.user_id}
                                     </p>
                                     {employee.role && <p className="text-xs text-gray-500">{employee.role}</p>}
+                                    {hasAccess && (
+                                      <p className="text-xs text-green-600 mt-1">✓ Доступ предоставлен</p>
+                                    )}
+                                    {!hasAccess && (
+                                      <p className="text-xs text-gray-400 mt-1">Нет доступа</p>
+                                    )}
                                   </div>
-                                  {assignedEmployeesDisplay.some(item => item.user_id === employee.user_id) ? (
+                                  {hasAccess ? (
                                     <button
                                       onClick={() => handleRemoveEmployeeAccess(employee.user_id)}
                                       className="text-red-600 hover:text-red-700 text-lg"
                                       aria-label="Удалить доступ специалиста"
+                                      title="Убрать доступ"
                                     >
                                       🗑️
                                     </button>
                                   ) : (
                                     <button
                                       onClick={() => handleAddEmployeeAccess(employee.user_id)}
-                                      className="text-[#0A6D83] hover:text-[#055063] text-lg"
-                                      aria-label="Добавить доступ"
+                                      className="text-[#7DD3DC] hover:text-[#5CBCC7] text-lg"
+                                      aria-label="Добавить доступ специалиста"
+                                      title="Добавить доступ"
                                     >
                                       ➕
                                     </button>
                                   )}
                                 </div>
-                              ))}
-                            </div>
-                            <p className="text-xs text-gray-500">
-                              Сотрудники пансионата имеют доступ к дневнику автоматически; можно убрать специалиста при необходимости.
-                            </p>
+                              )
+                            })}
                           </div>
-                        ) : null}
+                          <p className="text-xs text-gray-500 mt-2">
+                            Вы можете добавлять и убирать доступ у сотрудников пансионата.
+                          </p>
+                        </div>
                       </div>
-                    ) : null}
+                    )}
+
 
                     <div className="space-y-3">
                       <p className="text-sm font-semibold text-gray-700">
@@ -3347,23 +4641,31 @@ export const DiaryPage = () => {
                           )}
                         </div>
                       )}
-                      {diary?.organization_id &&
-                        canManageAccessSettings &&
-                        (organizationType !== 'patronage_agency' || organizationAccountAccess) && (
-                          <div className="flex items-center justify-between py-2 border-b border-gray-100">
-                            <div>
-                              <p className="text-sm text-gray-800">Организация</p>
-                              <p className="text-xs text-gray-500">ID: {diary.organization_id}</p>
-                            </div>
-                            <button
-                              onClick={() => handleRemoveAccess('organization')}
-                              className="text-red-600 hover:text-red-700 text-lg"
-                              aria-label="Удалить доступ организации"
-                            >
-                              🗑️
-                            </button>
+                      {diary?.organization_id && canManageAccessSettings && (
+                        <div className="flex items-center justify-between py-2 border-b border-gray-100">
+                          <div>
+                            <p className="text-sm text-gray-800">
+                              {organizationInfo?.name || 'Организация'}
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              {organizationInfo?.type === 'patronage_agency' 
+                                ? 'Патронажное агентство' 
+                                : organizationInfo?.type === 'pension'
+                                ? 'Пансионат'
+                                : 'Организация'}
+                              {organizationInfo?.id && ` (ID: ${organizationInfo.id})`}
+                            </p>
                           </div>
-                        )}
+                          <button
+                            onClick={() => handleRemoveAccess('organization')}
+                            className="text-red-600 hover:text-red-700 text-lg"
+                            aria-label="Удалить доступ организации"
+                            title="Отвязать дневник от организации"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      )}
                       {!diary?.organization_id &&
                         !diary?.caregiver_id &&
                         (organizationType !== 'patronage_agency' || assignedEmployeesDisplay.length === 0) && (
@@ -3483,9 +4785,9 @@ export const DiaryPage = () => {
                         <p className="text-xs font-semibold text-[#0A6D83] uppercase tracking-wide pl-1">
                           {group.label}
                         </p>
-                        {group.items.map(item => (
+                        {group.items.map((item, idx) => (
                           <div
-                            key={item.id}
+                            key={item.uniqueKey || `${item.id}_${item.metric_type}_${item.created_at}_${idx}`}
                             className="bg-white border border-[#7DD3DC] rounded-full px-4 py-2 text-sm text-[#4A4A4A] flex items-center justify-between gap-3"
                           >
                             <span className="flex-1 whitespace-normal break-words leading-tight">
@@ -3515,9 +4817,9 @@ export const DiaryPage = () => {
                         <p className="text-xs font-semibold text-[#0A6D83] uppercase tracking-wide pl-1">
                           {group.label}
                         </p>
-                        {group.items.map(item => (
+                        {group.items.map((item, idx) => (
                           <div
-                            key={item.id}
+                            key={item.uniqueKey || `${item.id}_${item.metric_type}_${item.created_at}_${idx}`}
                             className="bg-white border border-[#7DD3DC] rounded-full px-4 py-2 text-sm text-[#4A4A4A] flex items-center justify-between gap-3"
                           >
                             <span className="flex-1 whitespace-normal break-words leading-tight">
@@ -3553,6 +4855,99 @@ export const DiaryPage = () => {
                 дневнику. Ссылка сохранится в его личном кабинете.
               </p>
             </div>
+            )}
+
+            {/* Список приглашенных клиентов */}
+            {(invitedClients.length > 0 || organizationClientLink) && (
+              <div className="bg-white rounded-3xl shadow-sm p-5 space-y-3">
+                <h3 className="text-sm font-semibold text-gray-700 mb-3">
+                  Приглашенные клиенты
+                </h3>
+                {invitedClients.length === 0 && organizationClientLink && (
+                  <p className="text-xs text-gray-500 mb-3">
+                    Есть активная ссылка, но список приглашений пуст. Создайте новую ссылку для приглашения клиента.
+                  </p>
+                )}
+                {invitedClients.length > 0 && (
+                <div className="space-y-2">
+                  {invitedClients.map((client) => {
+                    // Клиент зарегистрирован, если есть accepted_at (из diary_client_links) 
+                    // ИЛИ used_at (из invite_tokens) - это означает, что приглашение было использовано
+                    // Также проверяем accepted_by или used_by - это user_id зарегистрированного клиента
+                    const isRegistered = !!(client.accepted_at || client.used_at) && !!(client.accepted_by || client.used_by || client.client_id)
+                    const clientName = client.registered_client_name || client.invited_client_name || 'Клиент'
+                    const clientPhone = client.registered_client_phone || client.invited_client_phone || null
+                    // Используем accepted_at если есть, иначе used_at
+                    const registrationDate = client.accepted_at || client.used_at
+                    
+                    console.log('[DiaryPage] Статус клиента:', {
+                      token: client.token,
+                      isRegistered,
+                      accepted_at: client.accepted_at,
+                      used_at: client.used_at,
+                      accepted_by: client.accepted_by,
+                      used_by: client.used_by,
+                      client_id: client.client_id,
+                      registrationDate,
+                      clientName,
+                    })
+                    
+                    return (
+                      <div
+                        key={client.invite_id}
+                        className="flex items-center justify-between py-3 px-3 border border-gray-100 rounded-2xl bg-gray-50"
+                      >
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <p className="text-sm font-semibold text-gray-800">
+                              {clientName}
+                            </p>
+                            {isRegistered && (
+                              <span className="inline-flex items-center rounded-full bg-green-100 text-green-700 text-xs font-semibold px-2 py-0.5">
+                                ✓ Зарегистрирован
+                              </span>
+                            )}
+                            {!isRegistered && client.used_at && (
+                              <span className="inline-flex items-center rounded-full bg-yellow-100 text-yellow-700 text-xs font-semibold px-2 py-0.5">
+                                ⚠ Использован
+                              </span>
+                            )}
+                            {!isRegistered && !client.used_at && (
+                              <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-600 text-xs font-semibold px-2 py-0.5">
+                                Ожидает
+                              </span>
+                            )}
+                          </div>
+                          {clientPhone && (
+                            <p className="text-xs text-gray-500 mb-1">{clientPhone}</p>
+                          )}
+                          {isRegistered && registrationDate && (
+                            <p className="text-xs text-gray-400">
+                              Подключен {new Date(registrationDate).toLocaleDateString('ru-RU', {
+                                day: '2-digit',
+                                month: 'long',
+                                year: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </p>
+                          )}
+                          {!isRegistered && client.created_at && (
+                            <p className="text-xs text-gray-400">
+                              Приглашение отправлено {new Date(client.created_at).toLocaleDateString('ru-RU', {
+                                day: '2-digit',
+                                month: 'long',
+                                year: 'numeric',
+                              })}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+                )}
+              </div>
             )}
 
             {organizationClientLink ? (
@@ -3733,14 +5128,14 @@ export const DiaryPage = () => {
                           {link.link}
                         </div>
                         <div className="flex flex-col gap-2 sm:flex-row">
-                          <Button onClick={() => handleCopyLink(link.link)} fullWidth>
+                          <Button onClick={() => handleCopyLink(link.link || '')} fullWidth>
                             Скопировать
                           </Button>
                           <Button
                             variant="outline"
                             onClick={() =>
                               openWhatsApp(
-                                link.link,
+                                link.link || '',
                                 'Я делюсь доступом к дневнику подопечного. Перейдите по ссылке:'
                               )
                             }

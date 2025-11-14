@@ -1,16 +1,25 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 
 interface PatientCard {
   id: string
-  client_id: string
+  client_id: string | null  // Может быть null для карточек, созданных организациями до регистрации клиента
   full_name: string
   date_of_birth: string | null
   address: string | null
   gender: 'male' | 'female'
   diagnoses: string[]
   mobility: 'walks' | 'sits' | 'lies'
+  metadata?: {
+    entrance?: string | null
+    apartment?: string | null
+    has_pets?: boolean
+    services?: string[]
+    service_wishes?: string[]
+    [key: string]: unknown
+  } | null
 }
 
 export const PatientCardsPage = () => {
@@ -25,68 +34,50 @@ export const PatientCardsPage = () => {
       return
     }
 
-    // Загружаем карточки подопечных
-    const loadPatientCards = () => {
+    // Загружаем карточки подопечных из Supabase
+    const loadPatientCards = async () => {
       try {
-        const allCards = JSON.parse(localStorage.getItem('patient_cards') || '[]') as PatientCard[]
-        const allDiaries = JSON.parse(localStorage.getItem('diaries') || '[]') as Array<{
-          id: string
-          patient_card_id: string
-          organization_id: string | null
-          caregiver_id: string | null
-          owner_id: string
-          client_id: string
-        }>
+        setIsLoading(true)
 
         // Определяем тип пользователя
-        const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-        const userRole = currentUser.user_role || user.user_metadata?.user_role
-        const organizationType = currentUser.organization_type || user.user_metadata?.organization_type
-        const organizationId =
-          (user as any).organization_id ||
-          user.user_metadata?.organization_id ||
-          currentUser.organization_id ||
-          null
-        const caregiverId =
-          (user as any).caregiver_id ||
-          user.user_metadata?.caregiver_id ||
-          currentUser.caregiver_id ||
-          null
+        const userRole = user.user_metadata?.role || user.user_metadata?.user_role
+        const organizationType = user.user_metadata?.organization_type
 
-        let filteredCards: PatientCard[] = []
+        let query = supabase
+          .from('patient_cards')
+          .select('id, client_id, full_name, date_of_birth, gender, diagnoses, mobility, metadata, created_at')
 
-        if (userRole === 'client') {
-          // Клиенты видят только свои карточки
-          filteredCards = allCards.filter(card => card.client_id === user.id)
-        } else if (userRole === 'org_employee') {
-          // Сотрудники организаций видят карточки, привязанные к дневникам их организации
-          if (organizationId) {
-            const allowedIds = new Set(
-              allDiaries
-                .filter(diary => String(diary.organization_id) === String(organizationId))
-                .map(diary => diary.patient_card_id)
-            )
-            filteredCards = allCards.filter(card => allowedIds.has(card.id))
-          } else {
-            filteredCards = []
-          }
-        } else if (organizationType === 'pension' || organizationType === 'patronage_agency') {
-          // Организации видят карточки своих клиентов
-          filteredCards = allCards
-        } else if (organizationType === 'caregiver') {
-          // Частные сиделки видят карточки из дневников, к которым они прикреплены
-          const effectiveCaregiverId = caregiverId || user.id
-          const allowedIds = new Set(
-            allDiaries
-              .filter(diary => diary.caregiver_id && String(diary.caregiver_id) === String(effectiveCaregiverId))
-              .map(diary => diary.patient_card_id)
-          )
-          filteredCards = allCards.filter(card => allowedIds.has(card.id))
+        // RLS политики автоматически фильтруют карточки по правам доступа
+        // Клиенты видят только свои карточки
+        // Организации видят карточки своих клиентов
+        // Сотрудники видят карточки через дневники организации
+        // Сиделки видят карточки через дневники, к которым прикреплены
+
+        const { data, error } = await query.order('created_at', { ascending: false })
+
+        if (error) {
+          console.error('Error loading patient cards from Supabase:', error)
+          setPatientCards([])
+          return
         }
 
-        setPatientCards(filteredCards)
+        // Преобразуем данные из Supabase в формат интерфейса
+        const cards: PatientCard[] = (data || []).map(card => ({
+          id: card.id,
+          client_id: card.client_id,
+          full_name: card.full_name,
+          date_of_birth: card.date_of_birth,
+          address: (card.metadata as any)?.address || null,
+          gender: (card.gender as 'male' | 'female') || 'male',
+          diagnoses: Array.isArray(card.diagnoses) ? card.diagnoses : [],
+          mobility: (card.mobility as 'walks' | 'sits' | 'lies') || 'walks',
+          metadata: card.metadata as any,
+        }))
+
+        setPatientCards(cards)
       } catch (error) {
         console.error('Error loading patient cards:', error)
+        setPatientCards([])
       } finally {
         setIsLoading(false)
       }
@@ -96,9 +87,11 @@ export const PatientCardsPage = () => {
   }, [user, navigate])
 
   const canCreateCard = () => {
-    const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-    const userRole = currentUser.user_role || user?.user_metadata?.user_role
-    const organizationType = currentUser.organization_type || user?.user_metadata?.organization_type
+    const userRole = user?.user_metadata?.role || user?.user_metadata?.user_role
+    const organizationType = user?.user_metadata?.organization_type
+
+    // Сотрудники организаций НЕ могут создавать карточки
+    if (userRole === 'org_employee') return false
 
     // Клиенты могут создавать карточки
     if (userRole === 'client') return true
@@ -114,9 +107,8 @@ export const PatientCardsPage = () => {
   }
 
   const canEditCard = () => {
-    const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-    const userRole = currentUser.user_role || user?.user_metadata?.user_role
-    const organizationType = currentUser.organization_type || user?.user_metadata?.organization_type
+    const userRole = user?.user_metadata?.role || user?.user_metadata?.user_role
+    const organizationType = user?.user_metadata?.organization_type
 
     // Клиенты могут редактировать карточки
     if (userRole === 'client') return true

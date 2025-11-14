@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
+import { useQueryClient } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { translateError } from '@/lib/errorMessages'
@@ -17,6 +18,7 @@ type ConfirmationFormData = z.infer<typeof confirmationSchema>
 
 export const EmailConfirmationPage = () => {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [searchParams] = useSearchParams()
   const { user } = useAuthStore()
   const email = searchParams.get('email') || user?.email || ''
@@ -81,6 +83,23 @@ export const EmailConfirmationPage = () => {
           setSession(session)
           // Проверяем авторизацию еще раз, чтобы убедиться, что все обновлено
           await checkAuth()
+          
+          // Обрабатываем pending токены доступа к дневникам через бэкенд
+          if (session.user?.id) {
+            try {
+              const { data: processResult, error: processError } = await supabase.rpc('process_pending_diary_access', {
+                p_user_id: session.user.id
+              })
+              
+              if (!processError && processResult?.success_count > 0) {
+                console.log('[EmailConfirmationPage] Обработано pending токенов:', processResult.success_count)
+                // Инвалидируем кэш для dashboard
+                await queryClient.invalidateQueries({ queryKey: ['dashboard-diaries'] })
+              }
+            } catch (error) {
+              console.error('[EmailConfirmationPage] Ошибка обработки pending токенов:', error)
+            }
+          }
           
           // Перенаправление на заполнение профиля через небольшую задержку
           setTimeout(() => {

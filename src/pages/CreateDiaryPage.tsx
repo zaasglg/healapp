@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
+import { supabase } from '@/lib/supabase'
 import { Button, Modal, Input, Checkbox } from '@/components/ui'
 
 type OrganizationType = 'pension' | 'patronage_agency' | 'caregiver'
@@ -90,35 +91,87 @@ export const CreateDiaryPage = () => {
       return
     }
 
-    // Загружаем доступные карточки
-    const loadAvailableCards = () => {
+    // Проверяем, является ли пользователь сотрудником организации
+    const userRole = user.user_metadata?.user_role || user.user_metadata?.role
+    if (userRole === 'org_employee') {
+      // Сотрудники организаций не могут создавать дневники
+      alert('У вас нет прав на создание дневников. Обратитесь к администратору организации.')
+      navigate('/dashboard')
+      return
+    }
+
+    // Загружаем доступные карточки из Supabase
+    const loadAvailableCards = async () => {
       try {
-        const allCards = JSON.parse(localStorage.getItem('patient_cards') || '[]') as PatientCard[]
-        const allDiaries = JSON.parse(localStorage.getItem('diaries') || '[]') as Diary[]
-
-        // Получаем ID карточек, для которых уже есть дневники
-        const cardsWithDiaries = new Set(allDiaries.map(d => d.patient_card_id))
-
         // Определяем тип пользователя
-        const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-        const userRole = currentUser.user_role || user.user_metadata?.user_role
-        const organizationType = currentUser.organization_type || user.user_metadata?.organization_type
+        const userRole = user.user_metadata?.user_role
+        const organizationType = user.user_metadata?.organization_type
 
-        let filteredCards: PatientCard[] = []
+        // Загружаем карточки из Supabase
+        let cardsQuery = supabase
+          .from('patient_cards')
+          .select('*')
 
         if (userRole === 'client') {
           // Клиенты видят только свои карточки
-          filteredCards = allCards.filter(card => card.client_id === user.id)
+          cardsQuery = cardsQuery.eq('client_id', user.id)
         } else if (organizationType === 'pension' || organizationType === 'patronage_agency') {
-          // Организации видят карточки своих клиентов
-          filteredCards = allCards
+          // Организации видят карточки своих клиентов (RLS политика сама отфильтрует)
+          // Не добавляем фильтр, полагаемся на RLS
         }
 
+        const { data: allCards, error: cardsError } = await cardsQuery
+
+        if (cardsError) {
+          console.error('Ошибка загрузки карточек:', cardsError)
+          alert('Не удалось загрузить карточки подопечных. Попробуйте позже.')
+          setAvailableCards([])
+          return
+        }
+
+        // Загружаем существующие дневники из Supabase
+        const { data: allDiaries, error: diariesError } = await supabase
+          .from('diaries')
+          .select('patient_card_id')
+
+        if (diariesError) {
+          console.error('Ошибка загрузки дневников:', diariesError)
+          // Используем только карточки без проверки дневников
+          setAvailableCards((allCards || []).map((card: any) => ({
+            id: card.id,
+            client_id: card.client_id || '',
+            full_name: card.full_name,
+            date_of_birth: card.date_of_birth,
+            gender: card.gender as 'male' | 'female',
+            diagnoses: Array.isArray(card.diagnoses) ? card.diagnoses : [],
+            mobility: card.mobility as 'walks' | 'sits' | 'lies',
+          })))
+          return
+        }
+
+        // Получаем ID карточек, для которых уже есть дневники
+        const cardsWithDiaries = new Set(
+          (allDiaries || []).map((d: any) => d.patient_card_id).filter(Boolean)
+        )
+
         // Фильтруем карточки, для которых еще нет дневников
-        const available = filteredCards.filter(card => !cardsWithDiaries.has(card.id))
+        const available = (allCards || [])
+          .filter((card: any) => !cardsWithDiaries.has(card.id))
+          .map((card: any) => ({
+            id: card.id,
+            client_id: card.client_id || '',
+            full_name: card.full_name,
+            date_of_birth: card.date_of_birth,
+            gender: card.gender as 'male' | 'female',
+            diagnoses: Array.isArray(card.diagnoses) ? card.diagnoses : [],
+            mobility: card.mobility as 'walks' | 'sits' | 'lies',
+          }))
+
         setAvailableCards(available)
       } catch (error) {
         console.error('Error loading patient cards:', error)
+        alert('Не удалось загрузить карточки подопечных. Попробуйте позже.')
+        setAvailableCards([])
       }
     }
 
@@ -219,7 +272,7 @@ export const CreateDiaryPage = () => {
     }
   }
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (selectedPinned.length === 0 && selectedAll.length === 0) {
       alert('Необходимо выбрать хотя бы один показатель')
       return
@@ -234,69 +287,124 @@ export const CreateDiaryPage = () => {
     }
 
     try {
-      const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-      const userRole = currentUser.user_role || user.user_metadata?.user_role
-      const organizationType = currentUser.organization_type || user.user_metadata?.organization_type
-      const storedOrganizationId = currentUser.organization_id || user.user_metadata?.organization_id || null
-      const storedCaregiverId = currentUser.caregiver_id || user.user_metadata?.caregiver_id || null
+      // Определяем тип пользователя из user_metadata
+      const userRole = user.user_metadata?.user_role
+      const organizationType = user.user_metadata?.organization_type as OrganizationType | undefined
 
-      const clientId = selectedCard.client_id || (userRole === 'client' ? user.id : currentUser.client_id) || user.id
-
+      // Для организаций и сотрудников получаем organization_id из Supabase
       let organizationId: string | null = null
       if (organizationType === 'pension' || organizationType === 'patronage_agency') {
+        // Для организаций organization_id = user.id (user_id организации)
         organizationId = user.id
-      } else if (userRole === 'org_employee' && storedOrganizationId) {
-        organizationId = storedOrganizationId
-      } else if (storedOrganizationId && userRole !== 'client') {
-        organizationId = storedOrganizationId
+      } else if (userRole === 'org_employee') {
+        // Для сотрудников загружаем organization_id из organization_employees
+        try {
+          const { data: employeeData, error: empError } = await supabase
+            .from('organization_employees')
+            .select('organization_id')
+            .eq('user_id', user.id)
+            .maybeSingle()
+          
+          if (!empError && employeeData) {
+            organizationId = employeeData.organization_id
+          }
+        } catch (error) {
+          console.error('Ошибка загрузки organization_id для сотрудника:', error)
+        }
       }
 
       let caregiverId: string | null = null
       if (organizationType === 'caregiver') {
-        caregiverId = user.id
-      } else if (userRole === 'client' && storedCaregiverId) {
-        caregiverId = storedCaregiverId
+        // ВАЖНО: Для сиделки нужно получить id из таблицы organizations, а не использовать user.id
+        // user.id - это user_id из auth.users, а caregiver_id должен быть id из organizations
+        try {
+          const { data: orgData, error: orgError } = await supabase
+            .from('organizations')
+            .select('id')
+            .eq('user_id', user.id)
+            .eq('type', 'caregiver')
+            .maybeSingle()
+          
+          if (!orgError && orgData) {
+            caregiverId = orgData.id
+            console.log('[CreateDiaryPage] Загружен caregiver_id для сиделки:', caregiverId)
+          } else if (orgError) {
+            console.error('Ошибка загрузки caregiver_id для сиделки:', orgError)
+          }
+        } catch (error) {
+          console.error('Ошибка загрузки caregiver_id для сиделки:', error)
+        }
+      } else if (userRole === 'client') {
+        // Для клиентов загружаем caregiver_id из clients
+        try {
+          const { data: clientData, error: clientError } = await supabase
+            .from('clients')
+            .select('invited_by_caregiver_id')
+            .eq('user_id', user.id)
+            .maybeSingle()
+          
+          if (!clientError && clientData) {
+            caregiverId = clientData.invited_by_caregiver_id
+          }
+        } catch (error) {
+          console.error('Ошибка загрузки caregiver_id для клиента:', error)
+        }
       }
 
-      let ownerId = user.id
-      if (userRole === 'org_employee' && organizationId) {
-        ownerId = organizationId
+      // Подготавливаем метрики для RPC
+      // Для пользовательских показателей сохраняем label и category в metadata
+      const getMetricMetadata = (metricKey: string) => {
+        // Проверяем, является ли это пользовательским показателем
+        if (metricKey.startsWith('custom_care_')) {
+          const label = metricKey.replace('custom_care_', '')
+          return { label, category: 'care' }
+        } else if (metricKey.startsWith('custom_physical_')) {
+          const label = metricKey.replace('custom_physical_', '')
+          return { label, category: 'physical' }
+        } else if (metricKey.startsWith('custom_excretion_')) {
+          const label = metricKey.replace('custom_excretion_', '')
+          return { label, category: 'excretion' }
+        } else if (metricKey.startsWith('custom_symptom_')) {
+          const label = metricKey.replace('custom_symptom_', '')
+          return { label, category: 'symptom' }
+        }
+        return {}
       }
 
-      const diaryId = `diary_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-      const diary: Diary = {
-        id: diaryId,
-        owner_id: ownerId,
-        client_id: clientId,
-        patient_card_id: selectedCardId,
-        caregiver_id: caregiverId,
-        organization_id: organizationId,
-        organization_type: organizationType ?? null,
-        created_at: new Date().toISOString(),
-      }
-
-      const diaries = JSON.parse(localStorage.getItem('diaries') || '[]')
-      localStorage.setItem('diaries', JSON.stringify([...diaries, diary]))
-
-      const allMetrics = JSON.parse(localStorage.getItem('diary_metrics') || '[]')
-      const newMetrics = [
-        ...selectedPinned.map(type => ({
-          id: crypto.randomUUID(),
-          diary_id: diaryId,
-          metric_type: type,
+      const metrics = [
+        ...selectedPinned.map(metricKey => ({
+          metric_key: metricKey,
           is_pinned: true,
+          metadata: getMetricMetadata(metricKey),
         })),
-        ...selectedAll.map(type => ({
-          id: crypto.randomUUID(),
-          diary_id: diaryId,
-          metric_type: type,
+        ...selectedAll.map(metricKey => ({
+          metric_key: metricKey,
           is_pinned: false,
+          metadata: getMetricMetadata(metricKey),
         })),
       ]
 
-      localStorage.setItem('diary_metrics', JSON.stringify([...allMetrics, ...newMetrics]))
+      // Создаем дневник через RPC
+      const { data: diary, error: diaryError } = await supabase.rpc('create_diary', {
+        p_patient_card_id: selectedCardId,
+        p_metrics: metrics,
+        p_organization_id: organizationId,
+        p_organization_type: organizationType ?? null,
+        p_caregiver_id: caregiverId,
+      })
 
-      navigate(`/diaries/${diaryId}`)
+      if (diaryError) {
+        console.error('Ошибка создания дневника:', diaryError)
+        alert(diaryError.message || 'Ошибка при создании дневника')
+        return
+      }
+
+      if (!diary || !diary.id) {
+        alert('Не удалось создать дневник. Попробуйте позже.')
+        return
+      }
+
+      navigate(`/diaries/${diary.id}`)
     } catch (error) {
       console.error('Error creating diary:', error)
       alert('Ошибка при создании дневника')

@@ -54,24 +54,28 @@ export const ClientsPage = () => {
           return
         }
 
-        // Загружаем клиентов организации
-        // TODO: После создания таблицы clients в БД, раскомментировать:
-        /*
-        const { data, error } = await supabase
+        // Загружаем клиентов, которые зарегистрировались по пригласительной ссылке организации
+        const { data: clientsData, error: clientsError } = await supabase
           .from('clients')
-          .select('*')
-          .eq('organization_id', orgData.id)
+          .select('id, first_name, last_name, phone, created_at, user_id')
+          .eq('invited_by_organization_id', organizationId)
           .order('created_at', { ascending: false })
 
-        if (error) {
-          console.error('Error loading clients:', error)
+        if (clientsError) {
+          console.error('Ошибка загрузки клиентов:', clientsError)
+          setClients([])
         } else {
-          setClients(data || [])
+          // Преобразуем данные в нужный формат
+          const formattedClients: Client[] = (clientsData || []).map((client: any) => ({
+            id: client.id,
+            first_name: client.first_name || '',
+            last_name: client.last_name || '',
+            phone: client.phone || '',
+            created_at: client.created_at,
+          }))
+          setClients(formattedClients)
+          console.log('[ClientsPage] Загружено клиентов:', formattedClients.length)
         }
-        */
-
-        // Временное решение: показываем пустой список
-        setClients([])
       } catch (err) {
         console.error('Error loading clients:', err)
       } finally {
@@ -128,25 +132,41 @@ export const ClientsPage = () => {
             </div>
           ) : (
             <div className="space-y-4">
-              {clients.map((client) => (
-                <div
-                  key={client.id}
-                  className="bg-white rounded-2xl shadow-md p-5"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      <p className="text-lg font-bold text-gray-dark mb-1">
-                        {client.first_name} {client.last_name}
-                      </p>
-                      {client.phone && (
-                        <p className="text-xs font-manrope text-gray-500">
-                          {client.phone}
+              {clients.map((client) => {
+                // Форматируем дату регистрации
+                const registrationDate = client.created_at
+                  ? new Date(client.created_at).toLocaleDateString('ru-RU', {
+                      year: 'numeric',
+                      month: 'long',
+                      day: 'numeric',
+                    })
+                  : null
+
+                return (
+                  <div
+                    key={client.id}
+                    className="bg-white rounded-2xl shadow-md p-5"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1">
+                        <p className="text-lg font-bold text-gray-dark mb-1">
+                          {client.first_name} {client.last_name}
                         </p>
-                      )}
+                        {client.phone && (
+                          <p className="text-xs font-manrope text-gray-500 mb-1">
+                            {client.phone}
+                          </p>
+                        )}
+                        {registrationDate && (
+                          <p className="text-xs font-manrope text-gray-400">
+                            Зарегистрирован: {registrationDate}
+                          </p>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>

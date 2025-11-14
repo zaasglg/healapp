@@ -7,12 +7,48 @@ interface ProtectedRouteProps {
 }
 
 export const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
-  const { isAuthenticated, loading, checkAuth } = useAuthStore()
+  const { isAuthenticated, loading, checkAuth, session, user } = useAuthStore()
 
   // Проверяем авторизацию при монтировании компонента
   useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
+    // Если уже есть сессия и пользователь авторизован, не вызываем checkAuth
+    // Это предотвращает race condition после регистрации
+    if (session && user && isAuthenticated) {
+      // Уже авторизован, сбрасываем loading если нужно
+      if (loading) {
+        console.log('ProtectedRoute: Already authenticated, resetting loading')
+        useAuthStore.getState().setLoading(false)
+      }
+      return
+    }
+    
+    // Если нет сессии/пользователя, вызываем checkAuth
+    // Это предотвращает застревание в состоянии загрузки
+    if (!session && !user && !isAuthenticated) {
+      console.log('ProtectedRoute: No session/user found, calling checkAuth()')
+      const checkAuthPromise = checkAuth()
+      // Устанавливаем таймаут на случай если checkAuth зависнет
+      const timeout = setTimeout(() => {
+        console.warn('ProtectedRoute: checkAuth timeout, resetting loading')
+        useAuthStore.getState().setLoading(false)
+      }, 5000) // 5 секунд таймаут
+      
+      checkAuthPromise
+        .then(() => {
+          clearTimeout(timeout)
+        })
+        .catch((err) => {
+          clearTimeout(timeout)
+          console.error('ProtectedRoute: checkAuth failed:', err)
+          // В случае ошибки сбрасываем loading
+          useAuthStore.getState().setLoading(false)
+        })
+    } else if (loading && (session || user)) {
+      // Если есть сессия/пользователь, но loading: true, сбрасываем loading
+      console.log('ProtectedRoute: Resetting loading state (have session/user)')
+      useAuthStore.getState().setLoading(false)
+    }
+  }, [checkAuth, session, user, isAuthenticated, loading])
 
   if (loading) {
     return (
@@ -24,6 +60,7 @@ export const ProtectedRoute = ({ children }: ProtectedRouteProps) => {
   }
 
   if (!isAuthenticated) {
+    console.log('ProtectedRoute: Not authenticated, redirecting to /login')
     return <Navigate to="/login" replace />
   }
 

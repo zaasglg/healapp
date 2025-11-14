@@ -1,0 +1,218 @@
+version: "3.9"
+
+x-common-env: &common-env
+  JWT_SECRET: ${SUPABASE_JWT_SECRET}
+  ANON_KEY: ${SUPABASE_ANON_KEY}
+  SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+  POSTGRES_PASSWORD: ${SUPABASE_DB_PASSWORD}
+
+services:
+  db:
+    image: supabase/postgres:15.1.0.88
+    container_name: caregivers-diary-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${SUPABASE_DB_PASSWORD}
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      ANON_KEY: ${SUPABASE_ANON_KEY}
+      SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "${SUPABASE_DB_PORT:-54322}:5432"
+    # ВАЖНО: volumes убраны для совместимости с Timeweb Cloud
+    # Данные БД будут храниться внутри контейнера (временное решение)
+
+  auth:
+    image: supabase/gotrue:v2.132.3
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      GOTRUE_API_EXTERNAL_URL: ${SUPABASE_SITE_URL:-http://localhost:54321}/auth/v1
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
+      GOTRUE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      GOTRUE_SITE_URL: ${SUPABASE_SITE_URL:-http://localhost:54321}
+      GOTRUE_URI_ALLOW_LIST: ${SUPABASE_URI_ALLOW_LIST:-http://localhost:54321}
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "true"
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_LOG_LEVEL: info
+      GOTRUE_SMTP_PORT: 587
+      GOTRUE_SUPABASE_DOMAIN: localhost
+      GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL: 10
+      GOTRUE_DB_NAMESPACE: auth
+      <<: *common-env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9999/settings"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rest:
+    image: postgrest/postgrest:v12.0.2
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMA: public,storage,graphql_public,extensions
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_POOL: 20
+      PGRST_DB_PREPARED_STATEMENTS: "true"
+      PGRST_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      PGRST_LOG_LEVEL: info
+      PGRST_SERVER_PORT: 3000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  realtime:
+    image: supabase/realtime:v2.22.12
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DB: postgres
+      DB_USER: postgres
+      DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
+      PORT: 4000
+      SECURE_CHANNELS: "true"
+      API_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      FLY_POSTGRES_HOST: db
+      REPLICATION_MODE: RLS
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  storage:
+    image: supabase/storage-api:v0.50.7
+    restart: unless-stopped
+    depends_on:
+      rest:
+        condition: service_started
+    environment:
+      STORAGE_POSTGREST_URL: http://rest:3000
+      STORAGE_LAUNCH_DARKLY_KEY: ""
+      STORAGE_DATABASE_URL: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
+      STORAGE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      STORAGE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      STORAGE_SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      STORAGE_S3_BUCKET: storage
+      FILE_STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      <<: *common-env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # ВАЖНО: volumes убраны - storage будет работать в памяти контейнера
+
+  imgproxy:
+    image: supabase/imgproxy:v2.23.0
+    restart: unless-stopped
+    depends_on:
+      storage:
+        condition: service_started
+    environment:
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /var/lib/storage
+      IMGPROXY_ENABLE_WEBP_DETECTION: "true"
+      IMGPROXY_MAX_ANIMATION_FRAMES: 30
+    # ВАЖНО: volumes убраны
+
+  functions:
+    image: supabase/edge-runtime:v1.43.2
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    environment:
+      EDGE_FUNCTIONS: "true"
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
+    ports:
+      - "${SUPABASE_FUNCTIONS_PORT:-54325}:9000"
+    # ВАЖНО: volumes убраны - Edge Functions не будут работать (нужно будет применить миграции вручную через SQL)
+
+  studio:
+    image: supabase/studio:20240829-155743
+    restart: unless-stopped
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      POSTGRES_META_URL: http://meta:8080
+    depends_on:
+      kong:
+        condition: service_started
+    ports:
+      - "${SUPABASE_STUDIO_PORT:-54324}:3000"
+
+  meta:
+    image: supabase/postgres-meta:v0.79.7
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: postgres
+      PG_META_DB_PASSWORD: ${SUPABASE_DB_PASSWORD}
+
+  analytics:
+    image: supabase/logflare:1.9.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      LOGFLARE_LOGGER_BACKEND: console
+      DATABASE_URL: postgres://postgres:${SUPABASE_DB_PASSWORD}@db:5432/postgres
+
+  kong:
+    image: supabase/kong:2.8.3
+    restart: unless-stopped
+    depends_on:
+      - auth
+      - rest
+      - realtime
+      - storage
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /var/lib/kong/kong.yml
+      KONG_PLUGINS: bundled
+      KONG_LOG_LEVEL: notice
+    ports:
+      - "${SUPABASE_API_PORT:-54321}:8000"
+      - "${SUPABASE_API_SSL_PORT:-54323}:8443"
+    # ВАЖНО: volumes убраны - kong.yml нужно будет встроить в образ или использовать другой способ
+
+# ВАЖНО: секция volumes полностью удалена для совместимости с Timeweb Cloud
+

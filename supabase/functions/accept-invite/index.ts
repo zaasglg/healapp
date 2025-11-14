@@ -273,14 +273,18 @@ async function handleOrganizationClient(
     },
   });
 
-  console.log("Creating client for organization:", {
+  console.log("Processing client registration for organization:", {
     user_id: user.id,
     organization_id: meta.organization_id,
     phone: normalizedPhone,
     first_name: payload.firstName || "",
     last_name: payload.lastName || "",
+    patient_card_id: meta.patient_card_id,
   });
   
+  // Создаем клиента для организации
+  // Организация создает карточку БЕЗ client_id (client_id = null)
+  // При регистрации клиента создаем нового клиента и обновляем client_id в карточке
   const clientInsert = await client
     .from("clients")
     .insert({
@@ -292,13 +296,13 @@ async function handleOrganizationClient(
     })
     .select("id")
     .single();
+  
   if (clientInsert.error) {
     console.error("Error creating client:", clientInsert.error);
     throw clientInsert.error;
   }
   
   console.log("✅ Client created successfully:", clientInsert.data.id);
-
   const clientId = clientInsert.data.id;
 
   const updates = [
@@ -322,13 +326,94 @@ async function handleOrganizationClient(
         .update({ owner_client_id: clientId })
         .eq("id", meta.diary_id)
     );
+    
+    // Обновляем diary_client_links при регистрации клиента
+    // Используем upsert, чтобы создать запись, если её нет, или обновить существующую
+    console.log("Updating diary_client_links:", {
+      diary_id: meta.diary_id,
+      client_id: clientId,
+      accepted_by: user.id,
+      token: invite.token,
+    });
+    
+    const diaryClientLinkUpdate = client
+      .from("diary_client_links")
+      .upsert({
+        diary_id: meta.diary_id,
+        client_id: clientId,
+        accepted_by: user.id,
+        accepted_at: new Date().toISOString(),
+        token: invite.token, // Сохраняем токен для совместимости
+      }, {
+        onConflict: 'diary_id',
+      });
+    
+    updates.push(diaryClientLinkUpdate);
   }
 
-  for (const op of updates) {
-    const { error } = await op;
-    if (error && error.code !== "PGRST116") {
-      // PGRST116: no rows updated (например, если diary_id=null) — игнорируем
-      throw error;
+  // Выполняем обновления последовательно, чтобы видеть ошибки для каждого
+  for (let i = 0; i < updates.length; i++) {
+    const op = updates[i];
+    try {
+      const { error, data } = await op;
+      if (error) {
+        // Логируем все ошибки для отладки
+        console.error(`Error in update operation ${i}:`, error);
+        console.error("Error details:", {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+        });
+        
+        if (error.code !== "PGRST116") {
+          // PGRST116: no rows updated (например, если diary_id=null) — игнорируем
+          // Но для diary_client_links это критично, поэтому логируем
+          if (i === updates.length - 1 && meta.diary_id) {
+            // Это последняя операция (diary_client_links), и она критична
+            console.error("CRITICAL: Failed to update diary_client_links!");
+            // Пытаемся обновить вручную через отдельный запрос
+            try {
+              const { error: manualError } = await client
+                .from("diary_client_links")
+                .upsert({
+                  diary_id: meta.diary_id,
+                  client_id: clientId,
+                  accepted_by: user.id,
+                  accepted_at: new Date().toISOString(),
+                  token: invite.token,
+                }, {
+                  onConflict: 'diary_id',
+                });
+              
+              if (manualError) {
+                console.error("CRITICAL: Manual update of diary_client_links also failed:", manualError);
+                // Не прерываем выполнение, но логируем критическую ошибку
+              } else {
+                console.log("✅ Successfully updated diary_client_links manually");
+              }
+            } catch (manualErr) {
+              console.error("CRITICAL: Exception during manual diary_client_links update:", manualErr);
+            }
+          }
+          // Для других операций пробрасываем ошибку
+          throw error;
+        } else {
+          console.warn(`Ignoring PGRST116 error (no rows updated) for operation ${i}`);
+        }
+      } else {
+        console.log(`Update operation ${i} succeeded`, data ? `(affected rows: ${Array.isArray(data) ? data.length : 1})` : '');
+      }
+    } catch (err) {
+      console.error(`Exception in update operation ${i}:`, err);
+      // Для критических операций пробрасываем ошибку
+      if (i === updates.length - 1 && meta.diary_id) {
+        // Это последняя операция (diary_client_links), но мы уже попытались обновить вручную
+        // Продолжаем выполнение, так как owner_client_id уже обновлен
+        console.warn("Continuing despite diary_client_links update error (owner_client_id already updated)");
+      } else {
+        throw err;
+      }
     }
   }
 

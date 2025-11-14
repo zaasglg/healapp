@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useForm, SubmitHandler } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
+import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { Button, Input } from '@/components/ui'
 
@@ -24,22 +25,6 @@ const patientCardSchema = z.object({
 })
 
 type PatientCardFormData = z.infer<typeof patientCardSchema>
-
-interface PatientCard {
-  id: string
-  client_id: string
-  full_name: string
-  date_of_birth: string | null
-  address: string | null
-  entrance: string | null
-  apartment: string | null
-  gender: 'male' | 'female'
-  has_pets: boolean
-  diagnoses: string[]
-  mobility: 'walks' | 'sits' | 'lies'
-  services: string[]
-  service_wishes: string[]
-}
 
 const DIAGNOSES_OPTIONS = [
   'Деменция',
@@ -80,28 +65,43 @@ export const PatientCardFormPage = () => {
   const [customWish, setCustomWish] = useState('')
   const [isDeleting, setIsDeleting] = useState(false)
 
-  const currentUserData = useMemo(() => {
-    try {
-      return JSON.parse(localStorage.getItem('current_user') || '{}')
-    } catch {
-      return {}
-    }
-  }, [])
-
-  const resolvedUserRole = currentUserData.user_role || user?.user_metadata?.user_role
-  const resolvedOrganizationType =
-    currentUserData.organization_type || user?.user_metadata?.organization_type
+  // Определяем роль пользователя (приоритет: user_metadata.role, затем user_metadata.user_role)
+  const resolvedUserRole = user?.user_metadata?.role || user?.user_metadata?.user_role || null
+  const resolvedOrganizationType = user?.user_metadata?.organization_type || null
   const isClientUser = resolvedUserRole === 'client'
   const isPension = resolvedOrganizationType === 'pension'
 
   // Проверка прав доступа
   const canEdit = () => {
-    if (isViewMode) return false
-    if (resolvedUserRole === 'client') return true
-    if (resolvedOrganizationType === 'pension' || resolvedOrganizationType === 'patronage_agency') return true
-    if (resolvedOrganizationType === 'caregiver') return false
-    if (resolvedUserRole === 'org_employee') return false
+    if (isViewMode) {
+      console.log('PatientCardFormPage: canEdit = false (view mode)')
+      return false
+    }
+    
+    if (resolvedUserRole === 'client') {
+      console.log('PatientCardFormPage: canEdit = true (client)')
+      return true
+    }
+    
+    if (resolvedOrganizationType === 'pension' || resolvedOrganizationType === 'patronage_agency') {
+      console.log('PatientCardFormPage: canEdit = true (organization)')
+      return true
+    }
+    
+    if (resolvedOrganizationType === 'caregiver') {
+      console.log('PatientCardFormPage: canEdit = false (caregiver)')
+      return false
+    }
+    
+    if (resolvedUserRole === 'org_employee') {
+      console.log('PatientCardFormPage: canEdit = false (org_employee)')
+      return false
+    }
 
+    console.log('PatientCardFormPage: canEdit = false (default)', {
+      resolvedUserRole,
+      resolvedOrganizationType,
+    })
     return false
   }
 
@@ -130,7 +130,10 @@ export const PatientCardFormPage = () => {
     },
   })
 
-  const draftKey = cardId ? `patient_card_draft_${cardId}` : 'patient_card_draft_new'
+  // Уникальный ключ черновика для каждого пользователя (чтобы не было конфликтов между разными аккаунтами)
+  const draftKey = cardId 
+    ? `patient_card_draft_${user?.id || 'anonymous'}_${cardId}` 
+    : `patient_card_draft_${user?.id || 'anonymous'}_new`
 
   const selectedDiagnoses = (watch('diagnoses') ?? []) as string[]
   const selectedServices = (watch('services') ?? []) as string[]
@@ -157,41 +160,70 @@ const sanitizeFormValues = (values: Partial<PatientCardFormData>): PatientCardFo
 })
 
   useEffect(() => {
-    const cards = JSON.parse(localStorage.getItem('patient_cards') || '[]') as PatientCard[]
-
+    const loadCardData = async () => {
     let initialValues: Partial<PatientCardFormData> = {}
 
     if (isEditMode && cardId) {
-      const card = cards.find(c => c.id === cardId)
+        // Загружаем карточку из Supabase
+        try {
+          console.log('PatientCardFormPage: Loading card data for edit mode, cardId:', cardId)
+          const { data: card, error } = await supabase
+            .from('patient_cards')
+            .select('*')
+            .eq('id', cardId)
+            .single()
+
+          if (error) {
+            console.error('PatientCardFormPage: Error loading card from Supabase:', error)
+            alert('Ошибка загрузки карточки: ' + error.message)
+            return
+          }
         
         if (card) {
+            console.log('PatientCardFormPage: Card loaded successfully:', card)
+            const metadata = (card.metadata as any) || {}
         initialValues = {
-          full_name: card.full_name,
+              full_name: card.full_name || '',
           date_of_birth: card.date_of_birth || '',
-            address: card.address || '',
-            entrance: card.entrance || '',
-            apartment: card.apartment || '',
-          gender: card.gender,
-          has_pets: card.has_pets,
-          diagnoses: card.diagnoses || [],
-          services: card.services || [],
-          service_wishes: card.service_wishes || [],
-          mobility: card.mobility || 'walks',
+              address: metadata.address || '',
+              entrance: metadata.entrance || '',
+              apartment: metadata.apartment || '',
+              gender: (card.gender as 'male' | 'female') || 'male',
+              has_pets: metadata.has_pets || false,
+              diagnoses: Array.isArray(card.diagnoses) ? card.diagnoses : [],
+              services: Array.isArray(metadata.services) ? metadata.services : [],
+              service_wishes: Array.isArray(metadata.service_wishes) ? metadata.service_wishes : [],
+              mobility: (card.mobility as 'walks' | 'sits' | 'lies') || 'walks',
+        }
+            console.log('PatientCardFormPage: Initial values prepared:', initialValues)
+      }
+        } catch (error) {
+          console.error('PatientCardFormPage: Error loading patient card from Supabase:', error)
+          alert('Ошибка загрузки карточки')
+          return
         }
       }
-    }
 
+      // Загружаем черновик из localStorage (только если НЕ режим редактирования)
+      // В режиме редактирования приоритет у данных из БД, а не из черновика
+      if (!isEditMode) {
     const draft = localStorage.getItem(draftKey)
     if (draft) {
       try {
         const parsed = JSON.parse(draft) as Partial<PatientCardFormData>
         initialValues = { ...initialValues, ...parsed }
+            console.log('PatientCardFormPage: Loaded draft from localStorage')
       } catch (error) {
-        console.warn('Не удалось загрузить черновик карточки', error)
+            console.warn('PatientCardFormPage: Не удалось загрузить черновик карточки', error)
+          }
       }
     }
 
+      console.log('PatientCardFormPage: Resetting form with values:', initialValues)
     reset(sanitizeFormValues(initialValues))
+    }
+
+    loadCardData()
   }, [isEditMode, cardId, reset, draftKey])
 
   useEffect(() => {
@@ -294,124 +326,185 @@ const sanitizeFormValues = (values: Partial<PatientCardFormData>): PatientCardFo
     })
   }
 
-  const resolveClientId = () => {
-    const storedUser = JSON.parse(localStorage.getItem('current_user') || 'null')
-    const idFromStored =
-      storedUser?.id ||
-      storedUser?.user_id ||
-      storedUser?.user?.id ||
-      storedUser?.user_metadata?.user_id
+  const resolveClientId = async (): Promise<string | null> => {
+    if (!user) return null
 
-    return user?.id || idFromStored || 'anonymous_client'
+    // Для клиентов получаем client_id из таблицы clients
+    const userRole = user.user_metadata?.role || user.user_metadata?.user_role
+    
+    if (userRole === 'client') {
+      try {
+        const { data: client, error } = await supabase
+          .from('clients')
+          .select('id')
+          .eq('user_id', user.id)
+          .single()
+
+        if (!error && client) {
+          return client.id
+        }
+      } catch (error) {
+        console.error('Error resolving client_id:', error)
+      }
+    }
+
+    // Для организаций - НЕ создаем клиента!
+    // Организация создает карточку БЕЗ client_id (client_id = null)
+    // При регистрации клиента по ссылке Edge Function создаст клиента и обновит client_id в карточке
+    if (resolvedOrganizationType === 'pension' || resolvedOrganizationType === 'patronage_agency') {
+      console.log('PatientCardFormPage: Organization creating card without client_id (will be set when client registers)')
+      return null // Возвращаем null - карточка будет создана без client_id
+    }
+
+    return null
   }
 
-  const persistCards = (cards: PatientCard[]) => {
-    localStorage.setItem('patient_cards', JSON.stringify(cards))
+  // Получаем organization_id для создания временного клиента
+  const getOrganizationId = async (): Promise<string | null> => {
+    if (!user) return null
 
-    const storedUser = JSON.parse(localStorage.getItem('current_user') || 'null')
-    if (storedUser) {
-      const updatedUser = {
-        ...storedUser,
-        user_metadata: {
-          ...(storedUser.user_metadata || {}),
-          patient_cards: cards,
-        },
+    try {
+      // Пробуем получить organization_id из таблицы organizations
+      const { data: org, error } = await supabase
+        .from('organizations')
+        .select('id')
+        .eq('user_id', user.id)
+        .single()
+
+      if (!error && org) {
+        return org.id
       }
-      localStorage.setItem('current_user', JSON.stringify(updatedUser))
+    } catch (error) {
+      console.error('Error getting organization_id:', error)
     }
+
+    return null
   }
 
   const persistCurrentValues = () => {
     if (!canEdit()) return
 
-    const cards = JSON.parse(localStorage.getItem('patient_cards') || '[]') as PatientCard[]
-    const existingCard = cardId ? cards.find(c => c.id === cardId) : undefined
-    const clientId = existingCard?.client_id ?? resolveClientId()
+    // Сохраняем черновик в localStorage для автосохранения
     const values = sanitizeFormValues(getValues())
-
-    if (isEditMode && cardId) {
-      if (existingCard) {
-        const updatedCards = cards.map(c =>
-          c.id === cardId
-            ? {
-                ...c,
-                client_id: existingCard.client_id,
-                full_name: values.full_name,
-                date_of_birth: values.date_of_birth || null,
-                address: isPension ? null : values.address || null,
-                entrance: isPension ? null : values.entrance || null,
-                apartment: isPension ? null : values.apartment || null,
-                gender: values.gender,
-                has_pets: isPension ? false : values.has_pets,
-                diagnoses: values.diagnoses,
-                services: values.services,
-                service_wishes: values.service_wishes,
-                mobility: values.mobility,
-              }
-            : c
-        )
-        persistCards(updatedCards)
-      }
-    } else if (!isEditMode) {
-      localStorage.setItem(
-        draftKey,
-        JSON.stringify({
-          ...values,
-          client_id: clientId,
-        })
-      )
-        }
+    localStorage.setItem(draftKey, JSON.stringify(values))
   }
 
   const onSubmit: SubmitHandler<PatientCardFormData> = async data => {
-    console.log('=== onSubmit вызван ===')
-    console.log('canEdit():', canEdit())
-    console.log('data:', data)
-    
-    if (!canEdit()) {
-      console.log('canEdit() вернул false, выходим')
+    console.log('PatientCardFormPage: onSubmit called', {
+      canEdit: canEdit(),
+      user: user?.id,
+      userRole: resolvedUserRole,
+      isEditMode,
+      cardId,
+    })
+
+    if (!canEdit() || !user) {
+      console.log('PatientCardFormPage: Cannot edit or no user')
       return
     }
 
     try {
-      const cards = JSON.parse(localStorage.getItem('patient_cards') || '[]') as PatientCard[]
-      const existingCard = isEditMode && cardId ? cards.find(c => c.id === cardId) : undefined
-      const clientId = existingCard?.client_id ?? resolveClientId()
-      console.log('clientId:', clientId)
+      // Получаем client_id
+      let clientId: string | null = null
 
-      const cardData: PatientCard = {
-        id: cardId || `card_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    if (isEditMode && cardId) {
+        // При редактировании получаем client_id из существующей карточки
+        console.log('PatientCardFormPage: Edit mode, loading existing card')
+        const { data: existingCard, error: cardError } = await supabase
+          .from('patient_cards')
+          .select('client_id')
+          .eq('id', cardId)
+          .single()
+
+        if (cardError) {
+          console.error('PatientCardFormPage: Error loading existing card:', cardError)
+          alert('Ошибка при загрузке карточки: ' + cardError.message)
+          return
+        }
+
+      if (existingCard) {
+          clientId = existingCard.client_id
+          console.log('PatientCardFormPage: Found client_id from existing card:', clientId)
+        }
+      } else {
+        // При создании получаем client_id
+        console.log('PatientCardFormPage: Create mode, resolving client_id')
+        clientId = await resolveClientId()
+        console.log('PatientCardFormPage: Resolved client_id:', clientId)
+        }
+
+      // Для организаций client_id может быть null - это нормально
+      // Карточка будет создана без client_id, и при регистрации клиента Edge Function обновит client_id
+      if (!clientId && resolvedUserRole === 'client') {
+        console.error('PatientCardFormPage: client_id is null for client user', {
+          userRole: resolvedUserRole,
+          organizationType: resolvedOrganizationType,
+          isEditMode,
+        })
+        
+        alert('Не удалось определить клиента. Пожалуйста, войдите в систему заново.')
+      return
+    }
+
+      // Для организаций client_id = null - это нормально
+      if (!clientId && (resolvedOrganizationType === 'pension' || resolvedOrganizationType === 'patronage_agency')) {
+        console.log('PatientCardFormPage: Creating card without client_id (organization will invite client later)')
+      }
+
+      // Подготавливаем данные для Supabase
+      const metadata: any = {}
+      if (!isPension) {
+        if (data.address) metadata.address = data.address
+        if (data.entrance) metadata.entrance = data.entrance
+        if (data.apartment) metadata.apartment = data.apartment
+        metadata.has_pets = data.has_pets || false
+      } else {
+        metadata.has_pets = false
+      }
+      if (data.services && data.services.length > 0) metadata.services = data.services
+      if (data.service_wishes && data.service_wishes.length > 0) metadata.service_wishes = data.service_wishes
+
+      const cardData = {
         client_id: clientId,
         full_name: data.full_name,
         date_of_birth: data.date_of_birth || null,
-        address: isPension ? null : (data.address || null),
-        entrance: isPension ? null : (data.entrance || null),
-        apartment: isPension ? null : (data.apartment || null),
         gender: data.gender,
-        has_pets: isPension ? false : (data.has_pets || false),
-        diagnoses: data.diagnoses,
-        services: data.services,
-        service_wishes: data.service_wishes || [],
+        diagnoses: data.diagnoses || [],
         mobility: data.mobility,
+        metadata: Object.keys(metadata).length > 0 ? metadata : null,
+        created_by: user.id,
       }
 
-      console.log('cardData:', cardData)
+      if (isEditMode && cardId) {
+        // Обновляем существующую карточку
+        const { error } = await supabase
+          .from('patient_cards')
+          .update(cardData)
+          .eq('id', cardId)
 
-      if (isEditMode) {
-        console.log('Режим редактирования')
-        const updatedCards = cards.map(c => (c.id === cardId ? cardData : c))
-        persistCards(updatedCards)
+        if (error) {
+          console.error('Error updating patient card:', error)
+          alert('Ошибка при обновлении карточки: ' + error.message)
+          return
+        }
       } else {
-        console.log('Режим создания')
-        persistCards([...cards, cardData])
+        // Создаем новую карточку
+        const { error } = await supabase
+          .from('patient_cards')
+          .insert(cardData)
+
+        if (error) {
+          console.error('Error creating patient card:', error)
+          alert('Ошибка при создании карточки: ' + error.message)
+          return
+        }
       }
 
-      console.log('Удаляем черновик:', draftKey)
+      // Удаляем черновик
       localStorage.removeItem(draftKey)
       
-      console.log('Навигация на /profile/patient-cards')
+      // Редирект на страницу карточек
       navigate('/profile/patient-cards')
-      console.log('navigate() вызван')
     } catch (error) {
       console.error('Error saving patient card:', error)
       alert('Ошибка при сохранении карточки')
@@ -419,13 +512,21 @@ const sanitizeFormValues = (values: Partial<PatientCardFormData>): PatientCardFo
   }
 
   const handleDelete = async () => {
-    if (!cardId || !confirm('Вы уверены, что хотите отвязать эту карточку?')) return
+    if (!cardId || !confirm('Вы уверены, что хотите удалить эту карточку?')) return
 
     setIsDeleting(true)
     try {
-      const cards = JSON.parse(localStorage.getItem('patient_cards') || '[]') as PatientCard[]
-      const updatedCards = cards.filter(c => c.id !== cardId)
-      persistCards(updatedCards)
+      const { error } = await supabase
+        .from('patient_cards')
+        .delete()
+        .eq('id', cardId)
+
+      if (error) {
+        console.error('Error deleting patient card:', error)
+        alert('Ошибка при удалении карточки: ' + error.message)
+        return
+      }
+
       localStorage.removeItem(draftKey)
     navigate('/profile/patient-cards')
     } catch (error) {

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
+import { useQueryClient } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { translateError } from '@/lib/errorMessages'
@@ -46,6 +47,7 @@ type ClientFormData = z.infer<typeof clientSchema>
 
 export const ProfileSetupPage = () => {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const { user } = useAuthStore()
   const [organizationType, setOrganizationType] = useState<OrganizationType | null>(null)
   const [isEmployee, setIsEmployee] = useState(false)
@@ -88,9 +90,30 @@ export const ProfileSetupPage = () => {
             phone: localStorageUser.phone
           })
           
-          // КЛИЕНТ: Если в localStorage есть клиент - используем его данные
+          // КЛИЕНТ: Если в localStorage есть клиент - проверяем, заполнен ли профиль
           if (localStorageUserRole === 'client' && localStorageUser.id) {
             console.log('✅ ProfileSetupPage: Detected CLIENT from localStorage')
+            
+            // Проверяем, заполнен ли профиль клиента в Supabase
+            try {
+              const { data: clientData, error: clientError } = await supabase
+                .from('clients')
+                .select('first_name, last_name')
+                .eq('user_id', localStorageUser.id)
+                .single()
+              
+              if (!clientError && clientData) {
+                // Если имя и фамилия уже заполнены, редиректим на dashboard
+                if (clientData.first_name && clientData.last_name) {
+                  console.log('ProfileSetupPage: Client profile already filled, redirecting to dashboard')
+                  navigate('/dashboard')
+                  return
+                }
+              }
+            } catch (err) {
+              console.error('ProfileSetupPage: Error checking client profile:', err)
+            }
+            
             setIsClient(true)
             setClientData({
               caregiver_id: localStorageUser.caregiver_id,
@@ -194,6 +217,27 @@ export const ProfileSetupPage = () => {
       // КЛИЕНТ: определяется ПЕРВЫМ, до проверки organization_type
       if (userRole === 'client') {
         console.log('✅ ProfileSetupPage: Detected CLIENT from authStore')
+        
+        // Проверяем, заполнен ли профиль клиента в Supabase
+        try {
+          const { data: clientData, error: clientError } = await supabase
+            .from('clients')
+            .select('first_name, last_name')
+            .eq('user_id', user.id)
+            .single()
+          
+          if (!clientError && clientData) {
+            // Если имя и фамилия уже заполнены, редиректим на dashboard
+            if (clientData.first_name && clientData.last_name) {
+              console.log('ProfileSetupPage: Client profile already filled, redirecting to dashboard')
+              navigate('/dashboard')
+              return
+            }
+          }
+        } catch (err) {
+          console.error('ProfileSetupPage: Error checking client profile:', err)
+        }
+        
         setIsClient(true)
         setClientData({
           caregiver_id: (user as any).caregiver_id || user.user_metadata?.caregiver_id || localStorageUser?.caregiver_id,
@@ -231,8 +275,8 @@ export const ProfileSetupPage = () => {
       // СОТРУДНИК: определяется последним
       if (userRole === 'org_employee') {
         let orgId = (user as any).organization_id || 
-                    user.user_metadata?.organization_id || 
-                    localStorageUser?.organization_id
+                     user.user_metadata?.organization_id || 
+                     localStorageUser?.organization_id
         
         // Если organization_id не найден, загружаем из user_profiles или organization_employees
         if (!orgId || orgId === 'temp') {
@@ -359,10 +403,10 @@ export const ProfileSetupPage = () => {
             .update({
             first_name: data.firstName,
             last_name: data.lastName,
-              city: data.city,
+            city: data.city,
             })
             .eq('id', createdOrg.id)
-          
+
           if (updateError) {
             console.warn('Не удалось обновить дополнительные поля организации:', updateError)
           }
@@ -395,6 +439,42 @@ export const ProfileSetupPage = () => {
 
         if (updateError) {
           throw updateError
+        }
+      }
+
+      // Обрабатываем pending токены доступа к дневникам через бэкенд
+      if (user?.id) {
+        try {
+          console.log('[ProfileSetupPage] Обработка pending токенов доступа к дневникам после создания организации')
+          
+          // Небольшая задержка, чтобы убедиться, что организация создана и доступна
+          await new Promise(resolve => setTimeout(resolve, 500))
+          
+          const { data: processResult, error: processError } = await supabase.rpc('process_pending_diary_access', {
+            p_user_id: user.id
+          })
+          
+          if (!processError && processResult) {
+            console.log('[ProfileSetupPage] Результат обработки pending токенов:', processResult)
+            
+            if (processResult.success_count > 0) {
+              console.log('[ProfileSetupPage] Успешно обработано токенов:', processResult.success_count)
+              
+              // Инвалидируем кэш запросов для dashboard
+              await queryClient.invalidateQueries({ queryKey: ['dashboard-diaries'] })
+              
+              // Перенаправляем на dashboard, где дневники будут видны
+              navigate('/dashboard', { replace: true })
+              return
+            } else if (processResult.error_count > 0) {
+              console.log('[ProfileSetupPage] Некоторые токены не удалось обработать:', processResult.errors)
+              // Продолжаем на dashboard, токены будут обработаны позже
+            }
+          } else if (processError) {
+            console.error('[ProfileSetupPage] Ошибка обработки pending токенов:', processError)
+          }
+        } catch (tokenError) {
+          console.error('[ProfileSetupPage] Ошибка обработки pending токенов:', tokenError)
         }
       }
 
@@ -436,9 +516,9 @@ export const ProfileSetupPage = () => {
         const { error: updateError } = await supabase
           .from('clients')
           .update({
-            first_name: data.firstName,
-            last_name: data.lastName,
-            phone: phone,
+        first_name: data.firstName,
+        last_name: data.lastName,
+        phone: phone,
             invited_by_caregiver_id: clientData.caregiver_id || null,
             invited_by_organization_id: clientData.organization_id || null,
           })
@@ -470,9 +550,9 @@ export const ProfileSetupPage = () => {
       // Обновляем user_metadata для удобства
       await supabase.auth.updateUser({
         data: {
-          firstName: data.firstName,
-          lastName: data.lastName,
-          phone: phone,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        phone: phone,
         },
       })
 
@@ -502,7 +582,7 @@ export const ProfileSetupPage = () => {
       let orgId = (user as any).organization_id || user.user_metadata?.organization_id || organizationId
       
       // Получаем токен приглашения (нужен для получения organization_type)
-      const orgInviteToken = (user as any).organization_invite_token || user.user_metadata?.organization_invite_token
+        const orgInviteToken = (user as any).organization_invite_token || user.user_metadata?.organization_invite_token
       
       // Если organization_id = 'temp' или отсутствует, пытаемся получить из токена
       if ((!orgId || orgId === 'temp') && orgInviteToken) {

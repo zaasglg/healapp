@@ -29,6 +29,9 @@ export const MetricFillModal = ({
   const [reminderStart, setReminderStart] = useState<string>('09:00')
   const [reminderEnd, setReminderEnd] = useState<string>('21:00')
 
+  // Проверяем, является ли это пользовательским показателем
+  const isCustomMetric = metricType.startsWith('custom_')
+
   useEffect(() => {
     if (!isOpen) {
       // Сброс значений при закрытии
@@ -40,6 +43,21 @@ export const MetricFillModal = ({
   }, [isOpen])
 
   const handleSave = () => {
+    // Для пользовательских показателей сохраняем только значение (текст)
+    if (isCustomMetric) {
+      const data: MetricFillData = {
+        value: value.trim(),
+        frequency: 1,
+        reminderStart: '',
+        reminderEnd: '',
+        times: [],
+      }
+      onSave(data)
+      onClose()
+      return
+    }
+
+    // Для стандартных показателей сохраняем полные данные
     const data: MetricFillData = {
       value,
       frequency,
@@ -101,7 +119,7 @@ export const MetricFillModal = ({
               type="text"
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              placeholder="Введите значение"
+              placeholder={isCustomMetric ? "Введите любое значение" : "Введите значение"}
               className="w-full"
             />
             <p className="text-xs text-gray-500 mt-2">
@@ -109,82 +127,87 @@ export const MetricFillModal = ({
             </p>
           </div>
 
-          {/* Блок выбора частоты заполнения */}
-          <div className="bg-white rounded-2xl border-2 border-[#7DD3DC] p-5">
-            <h3 className="text-base font-bold text-[#4A4A4A] mb-3">Заполнять раз в</h3>
-            <div className="flex items-center gap-3">
-              <Input
-                type="number"
-                min="1"
-                max="24"
-                value={frequency}
-                onChange={(e) => setFrequency(Number(e.target.value))}
-                className="w-20 text-center"
-              />
-              <span className="text-[#4A4A4A] font-medium">
-                {frequency === 1 ? 'раз' : frequency >= 2 && frequency <= 4 ? 'раза' : 'раз'} в день
-              </span>
-            </div>
-          </div>
+          {/* Для пользовательских показателей показываем только поле ввода */}
+          {!isCustomMetric && (
+            <>
+              {/* Блок выбора частоты заполнения */}
+              <div className="bg-white rounded-2xl border-2 border-[#7DD3DC] p-5">
+                <h3 className="text-base font-bold text-[#4A4A4A] mb-3">Заполнять раз в</h3>
+                <div className="flex items-center gap-3">
+                  <Input
+                    type="number"
+                    min="1"
+                    max="24"
+                    value={frequency}
+                    onChange={(e) => setFrequency(Number(e.target.value))}
+                    className="w-20 text-center"
+                  />
+                  <span className="text-[#4A4A4A] font-medium">
+                    {frequency === 1 ? 'раз' : frequency >= 2 && frequency <= 4 ? 'раза' : 'раз'} в день
+                  </span>
+                </div>
+              </div>
 
-          {/* Блок напоминаний */}
-          <div className="bg-white rounded-2xl border-2 border-[#7DD3DC] p-5">
-            <h3 className="text-base font-bold text-[#4A4A4A] mb-3">Напоминания</h3>
-            <div className="space-y-3">
-              <div className="flex items-center gap-3">
-                <label className="text-sm font-medium text-[#4A4A4A] w-12">С</label>
-                <Input
-                  type="time"
-                  value={reminderStart}
-                  onChange={(e) => setReminderStart(e.target.value)}
-                  className="flex-1"
-                />
+              {/* Блок напоминаний */}
+              <div className="bg-white rounded-2xl border-2 border-[#7DD3DC] p-5">
+                <h3 className="text-base font-bold text-[#4A4A4A] mb-3">Напоминания</h3>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <label className="text-sm font-medium text-[#4A4A4A] w-12">С</label>
+                    <Input
+                      type="time"
+                      value={reminderStart}
+                      onChange={(e) => setReminderStart(e.target.value)}
+                      className="flex-1"
+                    />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <label className="text-sm font-medium text-[#4A4A4A] w-12">ДО</label>
+                    <Input
+                      type="time"
+                      value={reminderEnd}
+                      onChange={(e) => setReminderEnd(e.target.value)}
+                      className="flex-1"
+                    />
+                  </div>
+                  
+                  {/* Расчетное время напоминаний */}
+                  {frequency > 1 && (
+                    <div className="mt-4 pt-4 border-t border-gray-200">
+                      <p className="text-xs font-medium text-gray-600 mb-2">Расчетное время напоминаний:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {calculateReminderTimes().map((time, index) => (
+                          <span
+                            key={index}
+                            className="px-3 py-1 bg-[#A0E7E5] text-[#4A4A4A] rounded-full text-xs font-medium"
+                          >
+                            {time}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-3">
-                <label className="text-sm font-medium text-[#4A4A4A] w-12">ДО</label>
-                <Input
-                  type="time"
-                  value={reminderEnd}
-                  onChange={(e) => setReminderEnd(e.target.value)}
-                  className="flex-1"
-                />
-              </div>
-              
-              {/* Расчетное время напоминаний */}
-              {frequency > 1 && (
-                <div className="mt-4 pt-4 border-t border-gray-200">
-                  <p className="text-xs font-medium text-gray-600 mb-2">Расчетное время напоминаний:</p>
-                  <div className="flex flex-wrap gap-2">
-                    {calculateReminderTimes().map((time, index) => (
-                      <span
-                        key={index}
-                        className="px-3 py-1 bg-[#A0E7E5] text-[#4A4A4A] rounded-full text-xs font-medium"
-                      >
-                        {time}
-                      </span>
-                    ))}
+
+              {/* Блок ИИ оценки */}
+              <div className="bg-gradient-to-br from-[#A0E7E5] to-[#7DD3DC] rounded-2xl p-5">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 bg-white bg-opacity-30 rounded-full flex items-center justify-center flex-shrink-0">
+                    <svg className="w-6 h-6 text-white animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                    </svg>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="text-base font-bold text-white mb-2">Оценка ИИ помощника</h3>
+                    <p className="text-sm text-white opacity-90">
+                      Слишком мало данных для анализа, идет сбор
+                    </p>
                   </div>
                 </div>
-              )}
-            </div>
-          </div>
-
-          {/* Блок ИИ оценки */}
-          <div className="bg-gradient-to-br from-[#A0E7E5] to-[#7DD3DC] rounded-2xl p-5">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 bg-white bg-opacity-30 rounded-full flex items-center justify-center flex-shrink-0">
-                <svg className="w-6 h-6 text-white animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                </svg>
               </div>
-              <div className="flex-1">
-                <h3 className="text-base font-bold text-white mb-2">Оценка ИИ помощника</h3>
-                <p className="text-sm text-white opacity-90">
-                  Слишком мало данных для анализа, идет сбор
-                </p>
-              </div>
-            </div>
-          </div>
+            </>
+          )}
 
           {/* Кнопка сохранения */}
           <Button

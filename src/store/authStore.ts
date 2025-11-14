@@ -36,8 +36,88 @@ export const useAuthStore = create<AuthState>((set) => ({
     try {
       set({ loading: true })
       
-      // СНАЧАЛА проверяем localStorage для клиентов и сотрудников (приоритет для них!)
-      // Это нужно, чтобы клиенты и сотрудники не теряли авторизацию из-за проверки Supabase
+      // ВАЖНО: СНАЧАЛА проверяем Supabase сессию (приоритет для новых регистраций через Edge Function)
+      // Это нужно, чтобы сотрудники, зарегистрированные через Edge Function, правильно определялись
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        
+        if (session?.user) {
+          console.log('authStore.checkAuth: Found Supabase session:', {
+            userId: session.user.id,
+            email: session.user.email,
+            organizationType: session.user.user_metadata?.organization_type,
+            userRole: session.user.user_metadata?.user_role,
+          })
+          
+          // ВАЖНО: Сначала проверяем organization_type (для организаций и сиделок)
+          // Это приоритетнее, чем user_role, так как organization_type устанавливается при регистрации
+          const organizationType = session.user.user_metadata?.organization_type
+          
+          // Если есть organization_type - это организация или сиделка (НЕ сотрудник, НЕ клиент)
+          if (organizationType && ['pension', 'patronage_agency', 'caregiver'].includes(organizationType)) {
+            // ВАЖНО: Проверяем, подтвержден ли email
+            // Если email не подтвержден, пользователь не считается авторизованным
+            // и должен ввести код подтверждения
+            const isEmailConfirmed = session.user.email_confirmed_at !== null
+            
+            if (isEmailConfirmed) {
+              // Если есть сессия Supabase и это организация/сиделка и email подтвержден - используем её и очищаем localStorage (чтобы не было конфликта)
+              // ВАЖНО: НЕ удаляем local_invite_tokens и local_employees - они нужны для работы с сотрудниками
+              localStorage.removeItem('current_user')
+              localStorage.removeItem('auth_token')
+              
+              console.log('✅ authStore.checkAuth: Authenticated as ORGANIZATION/CAREGIVER via Supabase')
+              set({
+                session,
+                user: session.user,
+                isAuthenticated: true,
+                loading: false,
+              })
+              return
+            } else {
+              // Email не подтвержден - пользователь не авторизован
+              // Не очищаем сессию, но не считаем пользователя авторизованным
+              console.log('⚠️ authStore.checkAuth: Email not confirmed for organization/caregiver')
+              set({
+                session: null,
+                user: null,
+                isAuthenticated: false,
+                loading: false,
+              })
+              return
+            }
+          }
+          
+          // Если organization_type отсутствует, проверяем user_role
+          // Сотрудники и клиенты теперь тоже работают через Supabase Auth (после регистрации через Edge Function)
+          const userRole = session.user.user_metadata?.user_role
+          const isEmployee = userRole === 'org_employee'
+          const isClient = userRole === 'client'
+          
+          if (isEmployee || isClient) {
+            // Сотрудники и клиенты теперь работают через Supabase Auth
+            // Очищаем старый localStorage если он есть
+            localStorage.removeItem('current_user')
+            localStorage.removeItem('auth_token')
+            
+            console.log('✅ authStore.checkAuth: Authenticated as', isEmployee ? 'EMPLOYEE' : 'CLIENT', 'via Supabase')
+            set({
+              session,
+              user: session.user,
+              isAuthenticated: true,
+              loading: false,
+            })
+            return
+          }
+        } else {
+          console.log('authStore.checkAuth: No Supabase session found')
+        }
+      } catch (supabaseError) {
+        // Если Supabase недоступен, продолжаем проверку localStorage
+        console.log('authStore.checkAuth: Supabase unavailable, checking localStorage:', supabaseError)
+      }
+      
+      // ТОЛЬКО если нет Supabase сессии, проверяем localStorage (для старых пользователей)
       const currentUser = localStorage.getItem('current_user')
       const authToken = localStorage.getItem('auth_token')
       
@@ -60,9 +140,9 @@ export const useAuthStore = create<AuthState>((set) => ({
             organization_id: userData.organization_id
           })
           
-          // Клиенты и сотрудники работают через localStorage
+          // Клиенты и сотрудники работают через localStorage (старый способ)
           if (userRole === 'client' || userRole === 'org_employee') {
-            console.log('✅ authStore.checkAuth: Loading', userRole === 'client' ? 'CLIENT' : 'EMPLOYEE', 'from localStorage')
+            console.log('✅ authStore.checkAuth: Loading', userRole === 'client' ? 'CLIENT' : 'EMPLOYEE', 'from localStorage (legacy)')
             set({
               session: {
                 user: userData,
@@ -81,65 +161,6 @@ export const useAuthStore = create<AuthState>((set) => ({
         }
       } else {
         console.log('authStore.checkAuth: No valid localStorage data found')
-      }
-      
-      // ТОЛЬКО если нет клиента/сотрудника в localStorage, проверяем Supabase для организаций/сиделок
-      try {
-        const { data: { session } } = await supabase.auth.getSession()
-        
-        if (session?.user) {
-          // ВАЖНО: Сначала проверяем organization_type (для организаций и сиделок)
-          // Это приоритетнее, чем user_role, так как organization_type устанавливается при регистрации
-          const organizationType = session.user.user_metadata?.organization_type
-          
-          // Если есть organization_type - это организация или сиделка (НЕ сотрудник, НЕ клиент)
-          if (organizationType && ['pension', 'patronage_agency', 'caregiver'].includes(organizationType)) {
-            // ВАЖНО: Проверяем, подтвержден ли email
-            // Если email не подтвержден, пользователь не считается авторизованным
-            // и должен ввести код подтверждения
-            const isEmailConfirmed = session.user.email_confirmed_at !== null
-            
-            if (isEmailConfirmed) {
-              // Если есть сессия Supabase и это организация/сиделка и email подтвержден - используем её и очищаем localStorage (чтобы не было конфликта)
-              // ВАЖНО: НЕ удаляем local_invite_tokens и local_employees - они нужны для работы с сотрудниками
-              localStorage.removeItem('current_user')
-              localStorage.removeItem('auth_token')
-              
-              set({
-                session,
-                user: session.user,
-                isAuthenticated: true,
-                loading: false,
-              })
-              return
-            } else {
-              // Email не подтвержден - пользователь не авторизован
-              // Не очищаем сессию, но не считаем пользователя авторизованным
-              set({
-                session: null,
-                user: null,
-                isAuthenticated: false,
-                loading: false,
-              })
-              return
-            }
-          }
-          
-          // Только если organization_type отсутствует, проверяем user_role
-          // Если это сотрудник или клиент (у них нет email в Supabase, они регистрируются по телефону)
-          const userRole = session.user.user_metadata?.user_role
-          const isEmployee = userRole === 'org_employee'
-          const isClient = userRole === 'client'
-          
-          if (isEmployee || isClient) {
-            // Если это сотрудник или клиент, но есть сессия Supabase - выходим из неё
-            // Сотрудники и клиенты работают через localStorage, а не через Supabase Auth
-            await supabase.auth.signOut()
-          }
-        }
-      } catch (supabaseError) {
-        // Если Supabase недоступен, продолжаем проверку localStorage
-        console.log('Supabase unavailable, checking localStorage')
       }
       
       // Если ничего не найдено

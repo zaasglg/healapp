@@ -84,9 +84,7 @@ export const EmployeesPage = () => {
   const navigate = useNavigate()
   const { user } = useAuthStore()
 
-  const [organizationType, setOrganizationType] = useState<OrganizationType>(null)
   const [organizationId, setOrganizationId] = useState<string | null>(null)
-  const [organizationAltIds, setOrganizationAltIds] = useState<string[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [employees, setEmployees] = useState<EmployeeRecord[]>([])
@@ -151,11 +149,16 @@ export const EmployeesPage = () => {
   const loadInvites = useCallback(
     async (orgId: string | null) => {
       if (!orgId) {
+        console.log('[EmployeesPage] loadInvites: orgId is null, clearing invites')
         setInvites([])
         return
       }
 
+      console.log('[EmployeesPage] loadInvites: Loading invites for orgId:', orgId)
+
       try {
+        // Загружаем приглашения с фильтрацией по organization_id
+        // Используем фильтрацию через вложенный select
         const { data, error } = await supabase
           .from('invite_tokens')
           .select(`
@@ -177,31 +180,54 @@ export const EmployeesPage = () => {
           .order('created_at', { ascending: false })
 
         if (error) {
-          console.error('Ошибка загрузки приглашений:', error)
+          console.error('[EmployeesPage] Ошибка загрузки приглашений:', error)
           setInvites([])
           return
         }
 
-        // Фильтруем приглашения по organization_id
-        const filteredInvites = (data || [])
+        console.log('[EmployeesPage] Загружено приглашений (до фильтрации):', data?.length || 0, data)
+
+        // Фильтруем приглашения по organization_id на клиенте
+        // (PostgREST не поддерживает прямую фильтрацию по связанной таблице)
+        const mappedInvites = (data || [])
+          .map((invite: any) => {
+            // organization_invite_tokens может быть массивом или объектом
+            const orgInviteData = Array.isArray(invite.organization_invite_tokens)
+              ? invite.organization_invite_tokens[0]
+              : invite.organization_invite_tokens
+
+            return {
+              id: invite.id,
+              token: invite.token,
+              invite_type: invite.invite_type,
+              created_at: invite.created_at,
+              expires_at: invite.expires_at,
+              used_at: invite.used_at,
+              revoked_at: invite.revoked_at,
+              organization_invite_tokens: orgInviteData,
+            }
+          })
           .filter((invite: any) => {
             const inviteOrgId = invite.organization_invite_tokens?.organization_id
-            return inviteOrgId === orgId
+            const matches = inviteOrgId === orgId
+            if (!matches) {
+              console.log('[EmployeesPage] Приглашение отфильтровано:', {
+                inviteId: invite.id,
+                inviteOrgId,
+                expectedOrgId: orgId,
+              })
+            }
+            return matches
           })
-          .map((invite: any) => ({
-            id: invite.id,
-            token: invite.token,
-            invite_type: invite.invite_type,
-            created_at: invite.created_at,
-            expires_at: invite.expires_at,
-            used_at: invite.used_at,
-            revoked_at: invite.revoked_at,
-            organization_invite_tokens: invite.organization_invite_tokens,
-          }))
+
+        console.log('[EmployeesPage] Отфильтровано приглашений:', mappedInvites.length)
 
         // Разделяем на активные и использованные
-        const activeInvites = filteredInvites.filter((invite: InviteToken) => !invite.used_at)
-        const usedInvites = filteredInvites.filter((invite: InviteToken) => invite.used_at)
+        const activeInvites = mappedInvites.filter((invite: InviteToken) => !invite.used_at)
+        const usedInvites = mappedInvites.filter((invite: InviteToken) => invite.used_at)
+
+        console.log('[EmployeesPage] Активных приглашений:', activeInvites.length)
+        console.log('[EmployeesPage] Использованных приглашений:', usedInvites.length)
 
         // Показываем уведомление о последнем использованном приглашении
         if (usedInvites.length > 0) {
@@ -220,7 +246,7 @@ export const EmployeesPage = () => {
 
         setInvites(activeInvites)
       } catch (loadError) {
-        console.error('Не удалось загрузить приглашения:', loadError)
+        console.error('[EmployeesPage] Не удалось загрузить приглашения:', loadError)
         setInvites([])
       }
     },
@@ -246,48 +272,98 @@ export const EmployeesPage = () => {
       return
     }
 
-    let currentUserOrgId: string | null = null
-    try {
-      const rawCurrentUser = localStorage.getItem('current_user')
-      if (rawCurrentUser) {
-        const parsed = JSON.parse(rawCurrentUser)
-        currentUserOrgId = normalizeId(parsed?.organization_id)
+    // Загружаем или создаем запись организации и получаем ее id
+    const ensureOrganizationExists = async (): Promise<string | null> => {
+      if (!orgType) return null
+      
+      try {
+        // Проверяем, есть ли запись в organizations
+        const { data: existingOrg, error: checkError } = await supabase
+          .from('organizations')
+          .select('id')
+          .eq('user_id', user.id)
+          .single()
+        
+        if (checkError && checkError.code === 'PGRST116') {
+          // Записи нет, создаем ее через RPC
+          const { data: createdOrg, error: rpcError } = await supabase.rpc('create_organization', {
+            p_organization_type: orgType,
+            p_name: user.user_metadata?.name || user.email || 'Организация',
+            p_phone: user.user_metadata?.phone || user.email || '',
+            p_address: user.user_metadata?.address || null,
+          })
+          
+          if (rpcError) {
+            console.error('Ошибка создания записи организации через RPC:', rpcError)
+            setError('Не удалось создать запись организации. Обратитесь в поддержку.')
+            return null
+          } else {
+            console.log('✅ Организация создана через RPC:', createdOrg)
+            return createdOrg?.id || null
+          }
+        } else if (checkError) {
+          console.error('Ошибка проверки организации:', checkError)
+          return null
+        } else if (existingOrg?.id) {
+          console.log('✅ Организация найдена в БД:', existingOrg.id)
+          return existingOrg.id
+        }
+      } catch (ensureError) {
+        console.error('Ошибка при проверке организации:', ensureError)
+        return null
       }
-    } catch (storageError) {
-      console.warn('Не удалось прочитать current_user для EmployeesPage', storageError)
+      return null
     }
-
-    const canonicalOrganizationId =
-      normalizeId(user.id) ||
-      normalizeId((user as any)?.user_id) ||
-      normalizeId(currentUserOrgId)
-    const metadataOrganizationId =
-      normalizeId((user as any).organization_id) ||
-      normalizeId(user.user_metadata?.organization_id) ||
-      normalizeId(currentUserOrgId)
-
-    const derivedOrganizationId = canonicalOrganizationId || metadataOrganizationId
-    const alternativeOrganizationIds: string[] = []
-    if (metadataOrganizationId && metadataOrganizationId !== derivedOrganizationId) {
-      alternativeOrganizationIds.push(metadataOrganizationId)
-    }
-    if (
-      currentUserOrgId &&
-      currentUserOrgId !== derivedOrganizationId &&
-      !alternativeOrganizationIds.includes(currentUserOrgId)
-    ) {
-      alternativeOrganizationIds.push(currentUserOrgId)
-    }
-
-    setOrganizationType(orgType)
-    setOrganizationId(derivedOrganizationId)
-    setOrganizationAltIds(alternativeOrganizationIds)
     
     // Загружаем данные из Supabase
-    Promise.all([
-      loadEmployees(derivedOrganizationId),
-      loadInvites(derivedOrganizationId),
-    ]).finally(() => {
+    ensureOrganizationExists().then((orgId) => {
+      if (!orgId) {
+        console.warn('[EmployeesPage] Не удалось получить organization_id')
+        setIsLoading(false)
+        return
+      }
+      
+      console.log('[EmployeesPage] Используем organization_id:', orgId)
+      
+      const canonicalOrganizationId = normalizeId(orgId)
+      const metadataOrganizationId =
+        normalizeId((user as any).organization_id) ||
+        normalizeId(user.user_metadata?.organization_id)
+      
+      const derivedOrganizationId = canonicalOrganizationId || metadataOrganizationId
+      
+      setOrganizationId(derivedOrganizationId)
+      
+      // Загружаем сотрудников и приглашения
+      const loadData = async () => {
+        console.log('[EmployeesPage] Загрузка данных для organization_id:', derivedOrganizationId)
+        try {
+          await Promise.all([
+            loadEmployees(derivedOrganizationId),
+            loadInvites(derivedOrganizationId),
+          ])
+        } catch (error) {
+          console.error('[EmployeesPage] Ошибка при загрузке данных:', error)
+        } finally {
+          setIsLoading(false)
+        }
+      }
+      
+      // Первоначальная загрузка
+      loadData()
+      
+      // Автоматическое обновление каждые 3 секунды (для быстрого отображения после регистрации)
+      const intervalId = setInterval(() => {
+        console.log('[EmployeesPage] Автоматическое обновление списка сотрудников и приглашений')
+        loadData()
+      }, 3000)
+      
+      // Очистка интервала при размонтировании
+      return () => {
+        clearInterval(intervalId)
+      }
+    }).catch((err) => {
+      console.error('[EmployeesPage] Ошибка при загрузке организации:', err)
       setIsLoading(false)
     })
   }, [user, navigate, loadEmployees, loadInvites])
@@ -444,6 +520,24 @@ export const EmployeesPage = () => {
           <h1 className="absolute left-1/2 transform -translate-x-1/2 text-lg font-bold text-gray-dark">
             Сотрудники
           </h1>
+          {organizationId && (
+            <button
+              onClick={() => {
+                setIsLoading(true)
+                Promise.all([
+                  loadEmployees(organizationId),
+                  loadInvites(organizationId),
+                ]).finally(() => setIsLoading(false))
+              }}
+              className="ml-auto p-2"
+              aria-label="Обновить"
+              title="Обновить список"
+            >
+              <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </button>
+          )}
         </div>
       </header>
 
@@ -460,7 +554,7 @@ export const EmployeesPage = () => {
               Сотрудник успешно зарегистрировался
             </p>
             <p className="mt-1 text-xs text-green-600">
-              Роль: {ROLE_LABELS[activationNotice.role || ''] || 'Сотрудник'}, время: {formatDate(activationNotice.used_at)}
+              Роль: {ROLE_LABELS[activationNotice.role || ''] || 'Сотрудник'}, время: {activationNotice.used_at ? formatDate(activationNotice.used_at) : 'Неизвестно'}
             </p>
           </div>
         )}
