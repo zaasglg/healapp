@@ -7,6 +7,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
 import { Button, Input } from '@/components/ui'
 import { useAuthStore } from '@/store/authStore'
+import { getFunctionUrl } from '@/utils/supabaseConfig'
 // Убрано: импорты localStorage утилит (все через бэкенд)
 
 // Типы организаций
@@ -86,7 +87,7 @@ export const RegisterPage = () => {
   }
 
   const [selectedType, setSelectedType] = useState<OrganizationType | null>(null)
-  const [isTokenValid, setIsTokenValid] = useState<boolean | null>(hasInviteToken ? null : true)
+  const [isTokenValid, setIsTokenValid] = useState<boolean | null>(hasInviteToken ? null : false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [orgInviteError, setOrgInviteError] = useState<string | null>(null)
@@ -114,9 +115,9 @@ export const RegisterPage = () => {
   // Проверка валидности токена
   useEffect(() => {
     if (clientToken) return
-    if (!hasInviteToken) {
-      // Свободная регистрация без приглашения
-      setIsTokenValid(true)
+    if (!hasInviteToken && !isOrgInvite) {
+      setIsTokenValid(false)
+      setError('Регистрация доступна только по пригласительной ссылке')
       return
     }
 
@@ -204,6 +205,10 @@ export const RegisterPage = () => {
   }, [isOrgInvite, orgToken, clientToken])
 
   const onSubmit = async (data: RegisterFormData) => {
+    if (!token) {
+      setError('Регистрация доступна только по пригласительной ссылке')
+      return
+    }
     if (!selectedType) {
       setError('Выберите тип организации')
       return
@@ -240,6 +245,31 @@ export const RegisterPage = () => {
             access_token: authData.session.access_token,
             refresh_token: authData.session.refresh_token,
           })
+        }
+        
+        // Если регистрация по пригласительному токену, помечаем токен как использованный
+        if (token) {
+          console.log('[RegisterPage] Помечаем токен как использованный:', { token, userId: authData.user.id })
+          try {
+            // Используем RPC функцию для обхода RLS политик
+            const { data: marked, error: markUsedError } = await supabase.rpc('mark_invite_token_used', {
+              p_token: token,
+              p_user_id: authData.user.id,
+            })
+
+            if (markUsedError) {
+              console.error('[RegisterPage] Ошибка пометки токена как использованного:', markUsedError)
+              // Продолжаем, это не критично
+            } else if (marked) {
+              console.log('[RegisterPage] ✅ Токен успешно помечен как использованный')
+            } else {
+              console.warn('[RegisterPage] ⚠️ Токен не найден или уже использован:', token)
+            }
+          } catch (markErr) {
+            console.error('[RegisterPage] Ошибка при пометке токена:', markErr)
+          }
+        } else {
+          console.log('[RegisterPage] Регистрация без токена приглашения')
         }
         
         // Создаем запись в user_profiles через RPC (устанавливаем роль)
@@ -311,17 +341,13 @@ export const RegisterPage = () => {
       // Edge Function создаст пользователя через admin API, обходя валидацию email
       
       // Используем прямой fetch для лучшей совместимости с CORS
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''
       const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
       
-      // Определяем URL для Edge Function
-      // Для облачного Supabase: https://project.supabase.co/functions/v1/accept-invite
-      // Для локального Docker: через SUPABASE_URL/functions/v1/accept-invite
-      const baseUrl = supabaseUrl.replace(/\/$/, '') // Убираем trailing slash
-      const functionUrl = `${baseUrl}/functions/v1/accept-invite`
+      // Используем утилиту для получения правильного URL функций
+      // Поддерживает как облачный Supabase, так и self-hosted
+      const functionUrl = getFunctionUrl('accept-invite')
       
       console.log('Calling Edge Function:', functionUrl)
-      console.log('Supabase URL:', supabaseUrl)
       
       const response = await fetch(functionUrl, {
         method: 'POST',
@@ -349,10 +375,48 @@ export const RegisterPage = () => {
         } catch {
           errorMessage = errorText || errorMessage
         }
+        
+        // Если пользователь уже зарегистрирован (409), предлагаем войти
+        if (response.status === 409) {
+          errorMessage = 'Пользователь с этим телефоном уже зарегистрирован. Используйте правильный пароль для входа или обратитесь к администратору.'
+        }
+        
         throw new Error(errorMessage)
       }
 
       const inviteResult = await response.json()
+      
+      // Проверяем, есть ли данные для входа (даже если нет сессии, может быть loginEmail)
+      if (!inviteResult?.data) {
+        throw new Error('Не удалось получить данные после регистрации. Попробуйте войти вручную.')
+      }
+      
+      // Если есть loginEmail, но нет сессии, пытаемся войти через email
+      if (inviteResult.data.loginEmail && !inviteResult.data.session) {
+        try {
+          // Используем email для входа, так как вход по телефону может быть отключен
+          const { data: loginData, error: loginError } = await supabase.auth.signInWithPassword({
+            email: inviteResult.data.loginEmail,
+            password: data.password,
+          })
+          
+          if (loginError || !loginData.session) {
+            throw new Error('Не удалось войти. Проверьте пароль или обратитесь к администратору.')
+          }
+          
+          // Используем сессию из входа
+          const { setUser, setSession, setLoading } = useAuthStore.getState()
+          setUser(loginData.user)
+          setSession(loginData.session)
+          setLoading(false)
+          useAuthStore.setState({ isAuthenticated: true })
+          
+          navigate('/profile/setup')
+          return
+        } catch (loginErr: any) {
+          throw new Error(loginErr.message || 'Не удалось войти. Попробуйте войти вручную.')
+        }
+      }
       
       if (!inviteResult?.data?.session) {
         throw new Error('Не удалось получить сессию после регистрации. Попробуйте войти вручную.')
@@ -569,13 +633,41 @@ export const RegisterPage = () => {
           <h1 className="text-2xl font-bold text-gray-dark mb-3">
             Недействительная ссылка
           </h1>
-          <p className="text-gray-600 text-sm mb-6">
+          <p className="text-gray-600 text-sm mb-4">
             {error || 'Эта ссылка для регистрации недействительна или уже использована.'}
           </p>
+          <p className="text-gray-600 text-sm mb-4">
+            Для регистрации необходимо записаться на закрытое тестирование.
+          </p>
+          <p className="text-gray-600 text-sm mb-6">
+            Свяжитесь с нами в WhatsApp, и мы отправим вам пригласительную ссылку для доступа к платформе.
+          </p>
         </div>
-        <Button onClick={() => navigate('/login')} fullWidth size="lg">
-          Войти в систему
-        </Button>
+        <div className="flex flex-col items-center gap-3">
+          <a
+            href={`https://wa.me/79145391376?text=${encodeURIComponent('Здравствуйте! Хочу записаться на закрытое тестирование Дневника подопечного. Нужна пригласительная ссылка для регистрации.')}`}
+            target="_blank"
+            rel="noreferrer"
+            className="w-full"
+          >
+            <Button 
+              fullWidth 
+              size="lg"
+              className="bg-gradient-to-r from-[#25D366] to-[#128C7E] hover:from-[#20BA5A] hover:to-[#0F7A6D] text-white border-0 shadow-lg hover:shadow-xl"
+            >
+              <svg className="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/>
+              </svg>
+              Связаться с нами в WhatsApp
+            </Button>
+          </a>
+          <Button onClick={() => navigate('/login')} size="lg" fullWidth variant="outline">
+            Войти в систему
+          </Button>
+          <Button onClick={() => navigate('/')} size="lg" fullWidth variant="outline">
+            На главную
+          </Button>
+        </div>
       </div>
     )
   }
@@ -586,6 +678,58 @@ export const RegisterPage = () => {
       <div className="text-center py-8">
         <div className="animate-spin w-12 h-12 border-4 border-blue-primary border-t-transparent rounded-full mx-auto mb-4"></div>
         <p className="text-gray-600">Проверка приглашения...</p>
+      </div>
+    )
+  }
+
+  // Если нет пригласительного токена и это не приглашение сотрудника — блокируем регистрацию
+  if (!hasInviteToken && !isOrgInvite) {
+    return (
+      <div className="text-center">
+        <div className="mb-6">
+          <h1 className="text-2xl font-bold text-gray-dark mb-3">Регистрация по приглашению</h1>
+          <p className="text-gray-600 text-sm mb-4">
+            Для регистрации необходимо записаться на закрытое тестирование.
+          </p>
+          <p className="text-gray-600 text-sm mb-4">
+            Свяжитесь с нами в WhatsApp, и мы отправим вам пригласительную ссылку для доступа к платформе.
+          </p>
+          <p className="text-gray-500 text-sm mb-6">
+            Если у вас уже есть аккаунт, вы можете{' '}
+            <button
+              onClick={() => navigate('/login')}
+              className="text-blue-primary font-semibold underline decoration-1 hover:text-blue-600"
+            >
+              войти в систему
+            </button>
+            .
+          </p>
+        </div>
+        <div className="flex flex-col items-center gap-3">
+          <a
+            href={`https://wa.me/79145391376?text=${encodeURIComponent('Здравствуйте! Хочу записаться на закрытое тестирование Дневника подопечного. Нужна пригласительная ссылка для регистрации.')}`}
+            target="_blank"
+            rel="noreferrer"
+            className="w-full"
+          >
+            <Button 
+              fullWidth 
+              size="lg"
+              className="bg-gradient-to-r from-[#25D366] to-[#128C7E] hover:from-[#20BA5A] hover:to-[#0F7A6D] text-white border-0 shadow-lg hover:shadow-xl"
+            >
+              <svg className="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/>
+              </svg>
+              Связаться с нами в WhatsApp
+            </Button>
+          </a>
+          <Button onClick={() => navigate('/login')} size="lg" fullWidth variant="outline">
+            Войти в систему
+          </Button>
+          <Button onClick={() => navigate('/')} size="lg" fullWidth variant="outline">
+            На главную
+          </Button>
+        </div>
       </div>
     )
   }

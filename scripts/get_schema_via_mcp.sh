@@ -1,0 +1,27 @@
+#!/bin/bash
+# Получить схему БД через MCP Supabase (альтернативный метод)
+
+echo "=== Получение схемы БД ==="
+echo ""
+echo "Для получения полной схемы БД используйте Supabase CLI на вашем локальном компьютере:"
+echo ""
+echo "1. Установите Supabase CLI:"
+echo "   npm install -g supabase"
+echo ""
+echo "2. Авторизуйтесь:"
+echo "   supabase login"
+echo ""
+echo "3. Свяжите проект:"
+echo "   supabase link --project-ref mtpawypaihmwrngirnxa"
+echo ""
+echo "4. Получите дамп:"
+echo "   supabase db dump -f migrations_backup.sql"
+echo ""
+echo "5. Загрузите на сервер:"
+echo "   scp migrations_backup.sql root@176.124.217.224:~/HealApp-Web/"
+echo ""
+echo "6. Примените на сервере:"
+echo "   ssh root@176.124.217.224"
+echo "   cd ~/HealApp-Web"
+echo "   docker compose exec -T db psql -U postgres -d postgres < migrations_backup.sql"
+

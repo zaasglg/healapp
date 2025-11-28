@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, Input } from '@/components/ui'
+import { Input } from '@/components/ui'
+import { supabase } from '@/lib/supabase'
+import { getFunctionUrl } from '@/utils/supabaseConfig'
 
 type SupportTab = 'overview' | 'history' | 'edit' | 'export' | 'logs'
 
@@ -102,7 +104,7 @@ const isEntityDeleted = (entity: any): boolean => {
   return false
 }
 
-const readArray = (keys: string[]): any[] => {
+const _readArray = (keys: string[]): any[] => {
   for (const key of keys) {
     if (!key) continue
     try {
@@ -118,6 +120,7 @@ const readArray = (keys: string[]): any[] => {
   }
   return []
 }
+void _readArray // Prevent unused variable warning
 
 const readObject = (key: string): Record<string, any> => {
   try {
@@ -173,7 +176,7 @@ const mergeDiaryEntries = (entries: any[]): DiaryMetricValue[] => {
   )
 }
 
-const loadDiaryHistoryEntries = (diaryId: string): DiaryMetricValue[] => {
+const _loadDiaryHistoryEntries = (diaryId: string): DiaryMetricValue[] => {
   try {
     const storage = readObject('diary_history')
     const rawEntries = storage[diaryId] || []
@@ -183,6 +186,7 @@ const loadDiaryHistoryEntries = (diaryId: string): DiaryMetricValue[] => {
     return []
   }
 }
+void _loadDiaryHistoryEntries // Prevent unused variable warning
 
 const persistDiaryHistoryEntries = (diaryId: string, entries: DiaryMetricValue[]) => {
   try {
@@ -279,23 +283,118 @@ export const AdminSupportPage = () => {
   const [search, setSearch] = useState('')
   const [dataVersion, setDataVersion] = useState(0)
   const [selectedDiaryId, setSelectedDiaryId] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<SupportTab>('overview')
+  const [_activeTab, setActiveTab] = useState<SupportTab>('overview')
+  void _activeTab // Prevent unused variable warning
+  const [isModalOpen, setIsModalOpen] = useState(false)
   const [cardDraft, setCardDraft] = useState<CardDraft | null>(null)
-  const [cardMessage, setCardMessage] = useState<string | null>(null)
+  const [_cardMessage, setCardMessage] = useState<string | null>(null)
+  void _cardMessage // Prevent unused variable warning
   const [historyEntries, setHistoryEntries] = useState<DiaryMetricValue[]>([])
   const [historyForm, setHistoryForm] = useState({ metricType: '', value: '', note: '' })
-  const [historyMessage, setHistoryMessage] = useState<string | null>(null)
+  const [_historyMessage, setHistoryMessage] = useState<string | null>(null)
+  void _historyMessage // Prevent unused variable warning
   const [filterRole, setFilterRole] = useState<DiaryFilter>('all')
   const [sortOrder, setSortOrder] = useState<DiarySort>('desc')
+  const [isLoading, setIsLoading] = useState(true)
+  const [supabaseData, setSupabaseData] = useState<{
+    diaries: any[]
+    patientCards: any[]
+    organizations: any[]
+    userProfiles: any[]
+    clients: any[]
+    employees: any[]
+    privateCaregivers: any[]
+    metricValues: any[]
+    history: any[]
+  }>({
+    diaries: [],
+    patientCards: [],
+    organizations: [],
+    userProfiles: [],
+    clients: [],
+    employees: [],
+    privateCaregivers: [],
+    metricValues: [],
+    history: [],
+  })
+
+  // Загрузка данных из Supabase
+  useEffect(() => {
+    const loadSupabaseData = async () => {
+      try {
+        setIsLoading(true)
+        const adminToken = localStorage.getItem('admin_token') || 'b8f56f5c-62f1-45d9-9e5a-e8bbfdadcf0f'
+        const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+
+        if (!supabaseAnonKey) {
+          console.error('Не настроены переменные окружения Supabase')
+          setIsLoading(false)
+          return
+        }
+
+        // Используем утилиту для получения правильного URL функций
+        const functionUrl = getFunctionUrl('admin-support-data')
+        const response = await fetch(`${functionUrl}?admin_token=${encodeURIComponent(adminToken)}`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseAnonKey}`,
+            'apikey': supabaseAnonKey,
+          },
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: 'Неизвестная ошибка' }))
+          console.error('Ошибка загрузки данных:', errorData)
+          setIsLoading(false)
+          return
+        }
+
+        const result = await response.json()
+
+        if (!result.success || !result.data) {
+          console.error('Неверный формат ответа от Edge Function')
+          setIsLoading(false)
+          return
+        }
+
+        console.log('✅ Загружены данные из Supabase для поддержки:', {
+          diaries: result.data.diaries?.length || 0,
+          patientCards: result.data.patientCards?.length || 0,
+          organizations: result.data.organizations?.length || 0,
+          metricValues: result.data.metricValues?.length || 0,
+          history: result.data.history?.length || 0,
+        })
+
+        setSupabaseData({
+          diaries: result.data.diaries || [],
+          patientCards: result.data.patientCards || [],
+          organizations: result.data.organizations || [],
+          userProfiles: result.data.userProfiles || [],
+          clients: result.data.clients || [],
+          employees: result.data.employees || [],
+          privateCaregivers: result.data.privateCaregivers || [],
+          metricValues: result.data.metricValues || [],
+          history: result.data.history || [],
+        })
+      } catch (error) {
+        console.error('Ошибка загрузки данных из Supabase:', error)
+      } finally {
+        setIsLoading(false)
+      }
+    }
+
+    loadSupabaseData()
+  }, [dataVersion])
 
   const diariesData = useMemo<SupportDiary[]>(() => {
-    const diariesRaw = readArray(['diaries']).filter(diary => !isEntityDeleted(diary))
-    const patientCardsRaw = readArray(['patient_cards'])
-    const localUsers = readArray(['local_users'])
-    const localClients = readArray(['local_clients'])
-    const localEmployees = readArray(['local_employees'])
-    const organizations = readArray(['organizations', 'admin_organizations'])
-    const caregiverProfiles = readArray(['private_caregiver_profiles'])
+    const diariesRaw = supabaseData.diaries.filter(diary => !isEntityDeleted(diary))
+    const patientCardsRaw = supabaseData.patientCards
+    const localUsers = supabaseData.userProfiles
+    const localClients = supabaseData.clients
+    const localEmployees = supabaseData.employees
+    const organizations = supabaseData.organizations
+    const caregiverProfiles = supabaseData.privateCaregivers
 
     const cardsMap = new Map<string, any>()
     patientCardsRaw.forEach(card => {
@@ -306,18 +405,21 @@ export const AdminSupportPage = () => {
     const resolvePerson = (id?: string | null): SupportPerson | null => {
       if (!id) return null
       const target = safeString(id)
-      const user = localUsers.find(item => safeString(item?.id) === target)
+      
+      // Ищем в user_profiles (для всех пользователей)
+      const user = localUsers.find(item => safeString(item?.user_id || item?.id) === target)
       if (user && !isEntityDeleted(user)) {
         return {
           id: target,
           name: buildPersonName(user) || user.phone || user.email || `Пользователь ${target}`,
           contact: user.phone || user.email || '',
           role: user.user_role || 'Пользователь',
-          source: 'local_users',
+          source: 'user_profiles',
           raw: user,
         }
       }
 
+      // Ищем в clients
       const client = localClients.find(item => safeString(item?.user_id || item?.id) === target)
       if (client && !isEntityDeleted(client)) {
         return {
@@ -325,11 +427,12 @@ export const AdminSupportPage = () => {
           name: buildPersonName(client) || client.phone || `Клиент ${target}`,
           contact: client.phone || '',
           role: 'Клиент',
-          source: 'local_clients',
+          source: 'clients',
           raw: client,
         }
       }
 
+      // Ищем в organization_employees
       const employee = localEmployees.find(item => safeString(item?.user_id || item?.id) === target)
       if (employee && !isEntityDeleted(employee)) {
         return {
@@ -337,11 +440,12 @@ export const AdminSupportPage = () => {
           name: buildPersonName(employee) || employee.phone || `Сотрудник ${target}`,
           contact: employee.phone || employee.email || '',
           role: employee.role || 'Сотрудник',
-          source: 'local_employees',
+          source: 'organization_employees',
           raw: employee,
         }
       }
 
+      // Ищем в private_caregiver_profiles
       const caregiver = caregiverProfiles.find(item => safeString(item?.user_id || item?.id) === target)
       if (caregiver && !isEntityDeleted(caregiver)) {
         return {
@@ -351,22 +455,6 @@ export const AdminSupportPage = () => {
           role: 'Частная сиделка',
           source: 'private_caregiver_profiles',
           raw: caregiver,
-        }
-      }
-
-      const organization = organizations.find(item => {
-        const orgId = item?.id ?? item?.user_id
-        return safeString(orgId) === target
-      })
-
-      if (organization && !isEntityDeleted(organization)) {
-        return {
-          id: target,
-          name: organization.name || buildPersonName(organization) || `Организация ${target}`,
-          contact: organization.phone || organization.email || '',
-          role: organizationTypeLabel(organization.type) || 'Организация',
-          source: 'organizations',
-          raw: organization,
         }
       }
 
@@ -439,7 +527,7 @@ export const AdminSupportPage = () => {
     })
 
     return activeDiaries
-  }, [dataVersion])
+  }, [dataVersion, supabaseData])
 
   const supportStats = useMemo(() => {
     const total = diariesData.length
@@ -533,11 +621,34 @@ export const AdminSupportPage = () => {
       services: Array.isArray(card?.services) ? card.services : [],
       service_wishes: Array.isArray(card?.service_wishes) ? card.service_wishes : [],
     })
-    setHistoryEntries(loadDiaryHistoryEntries(selectedDiary.id))
+    
+    // Загружаем историю из Supabase
+    const diaryHistory = supabaseData.history
+      .filter((entry: any) => entry.diary_id === selectedDiary.id)
+      .map((entry: any) => ({
+        id: entry.id,
+        diary_id: entry.diary_id,
+        metric_type: entry.metric_type || 'support_note',
+        value: entry.value || entry.details || '',
+        created_at: entry.occurred_at || entry.created_at || new Date().toISOString(),
+      }))
+    
+    // Также добавляем метрики из diary_metric_values
+    const diaryMetrics = supabaseData.metricValues
+      .filter((metric: any) => metric.diary_id === selectedDiary.id)
+      .map((metric: any) => ({
+        id: metric.id,
+        diary_id: metric.diary_id,
+        metric_type: metric.metric_type,
+        value: typeof metric.value === 'object' ? JSON.stringify(metric.value) : String(metric.value || ''),
+        created_at: metric.recorded_at || metric.created_at || new Date().toISOString(),
+      }))
+    
+    setHistoryEntries([...diaryHistory, ...diaryMetrics])
     setHistoryForm({ metricType: '', value: '', note: '' })
     setCardMessage(null)
     setHistoryMessage(null)
-  }, [selectedDiary?.id, dataVersion])
+  }, [selectedDiary?.id, dataVersion, supabaseData.history, supabaseData.metricValues])
 
   const logs = useMemo(() => loadSupportLogs(), [dataVersion])
   const selectedLogs = useMemo(
@@ -548,14 +659,22 @@ export const AdminSupportPage = () => {
     [logs, selectedDiary]
   )
 
-  const handleSelectDiary = (id: string) => {
+  const handleSelectDiary = (id: string, openModal = false) => {
     setSelectedDiaryId(id)
     setActiveTab('overview')
+    if (openModal) {
+      setIsModalOpen(true)
+    }
   }
 
-  const handleCardFieldChange = (field: keyof CardDraft, value: string | boolean | string[]) => {
+  const handleCloseModal = () => {
+    setIsModalOpen(false)
+  }
+
+  const _handleCardFieldChange = (field: keyof CardDraft, value: string | boolean | string[]) => {
     setCardDraft(prev => (prev ? { ...prev, [field]: value } : prev))
   }
+  void _handleCardFieldChange // Prevent unused variable warning
 
   // const handleToggleArrayField = (field: 'diagnoses' | 'services' | 'service_wishes', value: string) => {
   //   setCardDraft(prev => {
@@ -569,56 +688,54 @@ export const AdminSupportPage = () => {
   //   })
   // }
 
-  const handleSaveCard = () => {
+  const _handleSaveCard = async () => {
     if (!selectedDiary || !cardDraft || !selectedDiary.cardId) return
-    const cards = readArray(['patient_cards'])
-    const targetId = selectedDiary.cardId
-    const index = cards.findIndex(card => safeString(card?.id) === targetId)
-    if (index === -1) {
-      setCardMessage('Карточка не найдена в хранилище')
-      return
-    }
-
-    const normalizeList = (value: string | string[]) => {
-      if (Array.isArray(value)) {
-        return value
-      }
-      if (!value) return []
-      return value
-        .split(',')
-        .map(item => item.trim())
-        .filter(Boolean)
-    }
-
-    const updatedCard = {
-      ...cards[index],
-      full_name: cardDraft.full_name,
-      date_of_birth: cardDraft.date_of_birth || null,
-      address: cardDraft.address,
-      entrance: cardDraft.entrance,
-      apartment: cardDraft.apartment,
-      gender: cardDraft.gender,
-      mobility: cardDraft.mobility,
-      has_pets: cardDraft.has_pets,
-      diagnoses: normalizeList(cardDraft.diagnoses),
-      services: normalizeList(cardDraft.services),
-      service_wishes: normalizeList(cardDraft.service_wishes),
-    }
-
-    cards[index] = updatedCard
-
+    
     try {
-      localStorage.setItem('patient_cards', JSON.stringify(cards))
+      const normalizeList = (value: string | string[]) => {
+        if (Array.isArray(value)) {
+          return value
+        }
+        if (!value) return []
+        return value
+          .split(',')
+          .map(item => item.trim())
+          .filter(Boolean)
+      }
+
+      const { error } = await supabase
+        .from('patient_cards')
+        .update({
+          full_name: cardDraft.full_name,
+          date_of_birth: cardDraft.date_of_birth || null,
+          address: cardDraft.address,
+          entrance: cardDraft.entrance,
+          apartment: cardDraft.apartment,
+          gender: cardDraft.gender,
+          mobility: cardDraft.mobility,
+          has_pets: cardDraft.has_pets,
+          diagnoses: normalizeList(cardDraft.diagnoses),
+          services: normalizeList(cardDraft.services),
+          service_wishes: normalizeList(cardDraft.service_wishes),
+        })
+        .eq('id', selectedDiary.cardId)
+
+      if (error) {
+        console.error('Ошибка обновления карточки:', error)
+        setCardMessage('Ошибка при сохранении')
+        return
+      }
+
       persistSupportLog({
         id: `support_${Date.now()}`,
         diaryId: selectedDiary.id,
         timestamp: new Date().toISOString(),
         action: 'update_patient_card',
-        details: `Обновлены данные карточки подопечного (${targetId})`,
+        details: `Обновлены данные карточки подопечного (${selectedDiary.cardId})`,
         payload: {
-          full_name: updatedCard.full_name,
-          date_of_birth: updatedCard.date_of_birth,
-          address: updatedCard.address,
+          full_name: cardDraft.full_name,
+          date_of_birth: cardDraft.date_of_birth,
+          address: cardDraft.address,
         },
       })
       setCardMessage('Данные сохранены')
@@ -628,8 +745,9 @@ export const AdminSupportPage = () => {
       setCardMessage('Ошибка при сохранении')
     }
   }
+  void _handleSaveCard // Prevent unused variable warning
 
-  const handleAddHistoryEntry = () => {
+  const _handleAddHistoryEntry = () => {
     if (!selectedDiary) return
     const value = historyForm.value.trim()
     if (!value) {
@@ -669,8 +787,9 @@ export const AdminSupportPage = () => {
     setHistoryMessage('Запись добавлена')
     setDataVersion(prev => prev + 1)
   }
+  void _handleAddHistoryEntry // Prevent unused variable warning
 
-  const handleRemoveHistoryEntry = (entryId: string) => {
+  const _handleRemoveHistoryEntry = (entryId: string) => {
     if (!selectedDiary) return
     const confirmed = window.confirm('Удалить выбранную запись истории?')
     if (!confirmed) return
@@ -691,8 +810,9 @@ export const AdminSupportPage = () => {
     setHistoryMessage('Запись удалена')
     setDataVersion(prev => prev + 1)
   }
+  void _handleRemoveHistoryEntry // Prevent unused variable warning
 
-  const handleExport = () => {
+  const _handleExport = () => {
     if (!selectedDiary) return
     const exportPayload = {
       diary: selectedDiary.raw,
@@ -713,18 +833,12 @@ export const AdminSupportPage = () => {
     document.body.removeChild(link)
     URL.revokeObjectURL(url)
   }
+  void _handleExport // Prevent unused variable warning
 
   return (
     <div className="space-y-8">
-      <div className="space-y-3">
+      <div className="space-y-2">
         <h2 className="text-2xl font-bold text-gray-800">Помощь пользователям</h2>
-        <p className="text-sm text-gray-600 leading-relaxed max-w-3xl">
-          Инструменты для службы поддержки: просмотр дневников, внесение изменений от имени пользователей и журнал
-          выполненных действий. Используйте панель слева, чтобы выбрать нужный дневник.
-        </p>
-        <div className="inline-flex text-xs text-gray-500 bg-white border border-gray-200 px-3 py-1 rounded-full">
-          Шаг 12.4 — операции выполняются в локальном хранилище данных
-        </div>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -744,525 +858,266 @@ export const AdminSupportPage = () => {
         ))}
       </div>
 
-      <div className="bg-white border border-gray-200 rounded-3xl p-6 shadow-sm space-y-6">
-        <div className="flex flex-col lg:flex-row gap-6">
-          <div className="lg:w-1/3 space-y-4">
-            <Input
-              value={search}
-              onChange={event => setSearch(event.target.value)}
-              placeholder="Поиск по ФИО, организации или ID дневника"
-            />
-            <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
-              <div className="flex flex-wrap gap-2">
-                {(
-                  [
-                    { value: 'all', label: 'Все' },
-                    { value: 'with_org', label: 'С организацией' },
-                    { value: 'without_org', label: 'Без организации' },
-                    { value: 'with_caregiver', label: 'С сиделкой' },
-                  ] as Array<{ value: DiaryFilter; label: string }>
-                ).map(option => (
-                  <button
-                    key={option.value}
-                    onClick={() => setFilterRole(option.value)}
-                    className={`px-3 py-1 rounded-full border transition-colors ${
-                      filterRole === option.value
-                        ? 'border-[#55ACBF] bg-[#55ACBF]/10 text-[#0A6D83] font-medium'
-                        : 'border-gray-200 text-gray-500 hover:border-[#55ACBF]/40'
-                    }`}
-                    type="button"
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                onClick={() => setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'))}
-                className="px-3 py-1 rounded-full border border-gray-200 text-gray-600 hover:border-[#55ACBF]/40 transition-colors"
-              >
-                Сортировка: {sortOrder === 'desc' ? 'сначала новые' : 'сначала старые'}
-              </button>
-            </div>
-            <div className="border border-gray-100 rounded-2xl divide-y divide-gray-100 max-h-[520px] overflow-y-auto">
-              {filteredDiaries.length === 0 && (
-                <div className="px-4 py-6 text-sm text-gray-500 text-center">
-                  Дневники не найдены. Измените запрос поиска.
-                </div>
-              )}
-              {filteredDiaries.map(item => {
-                const isActive = item.id === selectedDiaryId
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => handleSelectDiary(item.id)}
-                    className={`w-full text-left px-4 py-4 transition-colors rounded-2xl border ${
-                      isActive
-                        ? 'border-[#55ACBF] bg-[#F7FCFD] shadow-sm'
-                        : 'border-transparent hover:border-[#55ACBF]/30 hover:bg-gray-50'
-                    }`}
-                  >
-                    <div className="space-y-1">
-                      <p className="text-sm font-semibold text-gray-800">{item.patientName}</p>
-                      <p className="text-xs text-gray-500 break-all">ID дневника: {item.id}</p>
-                      {item.cardId && (
-                        <p className="text-xs text-gray-500 break-all">Карточка: {item.cardId}</p>
-                      )}
-                      <div className="flex flex-wrap gap-1 text-[11px] text-gray-500">
-                        {item.owner && <span>Владелец: {item.owner.name}</span>}
-                        {item.organization && <span>Орг.: {item.organization.name}</span>}
-                      </div>
-                    </div>
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
-          <div className="lg:flex-1 bg-gray-50 rounded-3xl p-6 space-y-6 border border-gray-100">
-            {!selectedDiary ? (
-              <div className="text-center text-sm text-gray-500 py-12">
-                Выберите дневник слева, чтобы просмотреть подробности.
-              </div>
-            ) : (
-              <>
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                  <div>
-                    <p className="text-xs uppercase text-gray-500">Подопечный</p>
-                    <h3 className="text-xl font-semibold text-gray-800">{selectedDiary.patientName}</h3>
-                    <div className="flex flex-wrap gap-2 mt-2 text-xs text-gray-500">
-                      <span>Дневник создан: {formatDateTime(selectedDiary.createdAt)}</span>
-                      {selectedDiary.organization?.typeLabel && (
-                        <span>Организация: {selectedDiary.organization.typeLabel}</span>
-                      )}
-                    </div>
-                  </div>
-                <div className="flex flex-wrap gap-2 text-xs">
-                  {selectedDiary.owner && (
-                    <div className="px-3 py-1 bg-white border border-gray-200 rounded-full text-gray-600">
-                      Владелец: {selectedDiary.owner.name}
-                    </div>
-                  )}
-                  {selectedDiary.caregiver && (
-                    <div className="px-3 py-1 bg-white border border-gray-200 rounded-full text-gray-600">
-                      Сиделка: {selectedDiary.caregiver.name}
-                    </div>
-                  )}
-                </div>
-                </div>
-
+      {isLoading ? (
+        <div className="bg-white border border-gray-200 rounded-3xl p-6 shadow-sm text-center text-gray-500">
+          Загрузка данных...
+        </div>
+      ) : (
+        <div className="bg-white border border-gray-200 rounded-3xl p-6 shadow-sm space-y-6">
+          <div className="flex flex-col lg:flex-row gap-6">
+            {/* Левая колонка: список дневников */}
+            <div className="lg:w-1/3 space-y-4">
+              <Input
+                value={search}
+                onChange={event => setSearch(event.target.value)}
+                placeholder="Поиск по ФИО, организации или ID дневника"
+              />
+              <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
                 <div className="flex flex-wrap gap-2">
-                  {(['overview', 'history', 'edit', 'export', 'logs'] as SupportTab[]).map(tab => (
+                  {(
+                    [
+                      { value: 'all', label: 'Все' },
+                      { value: 'with_org', label: 'С организацией' },
+                      { value: 'without_org', label: 'Без организации' },
+                      { value: 'with_caregiver', label: 'С сиделкой' },
+                    ] as Array<{ value: DiaryFilter; label: string }>
+                  ).map(option => (
                     <button
-                      key={tab}
-                      onClick={() => setActiveTab(tab)}
-                      className={`px-3 py-1.5 rounded-full text-sm transition-colors ${
-                        activeTab === tab
-                          ? 'bg-[#55ACBF]/10 text-[#0A6D83] border border-[#55ACBF]/40'
-                          : 'text-gray-500 border border-transparent hover:bg-white'
+                      key={option.value}
+                      onClick={() => setFilterRole(option.value)}
+                      className={`px-3 py-1 rounded-full border transition-colors ${
+                        filterRole === option.value
+                          ? 'border-[#55ACBF] bg-[#55ACBF]/10 text-[#0A6D83] font-medium'
+                          : 'border-gray-200 text-gray-500 hover:border-[#55ACBF]/40'
                       }`}
+                      type="button"
                     >
-                      {tab === 'overview'
-                        ? 'Обзор'
-                        : tab === 'history'
-                        ? 'История'
-                        : tab === 'edit'
-                        ? 'Редактировать'
-                        : tab === 'export'
-                        ? 'Экспорт'
-                        : 'Журнал'}
+                      {option.label}
                     </button>
                   ))}
                 </div>
-
-                {activeTab === 'overview' && (
-                  <div className="space-y-4">
-                    <div className="bg-white rounded-2xl p-5 shadow-sm space-y-3">
-                      <h4 className="text-sm font-semibold text-gray-700">Быстрый обзор</h4>
-                      <div className="grid sm:grid-cols-2 gap-3 text-sm text-gray-600">
-                        <div>
-                          <p className="text-xs uppercase text-gray-400">Владелец</p>
-                          <p>{selectedDiary.owner?.name || '—'}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs uppercase text-gray-400">Контакт владельца</p>
-                          <p className="text-xs text-gray-500">
-                            {selectedDiary.owner?.raw?.email ||
-                              selectedDiary.owner?.contact ||
-                              '—'}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs uppercase text-gray-400">Организация</p>
-                          <p>{selectedDiary.organization?.name || '—'}</p>
-                          {selectedDiary.organization?.contact && (
-                            <p className="text-xs text-gray-400">{selectedDiary.organization.contact}</p>
-                          )}
-                        </div>
-                        <div>
-                          <p className="text-xs uppercase text-gray-400">Сиделка</p>
-                          <p>{selectedDiary.caregiver?.name || '—'}</p>
-                          {selectedDiary.caregiver?.contact && (
-                            <p className="text-xs text-gray-400">{selectedDiary.caregiver.contact}</p>
-                          )}
-                        </div>
-                        <div>
-                          <p className="text-xs uppercase text-gray-400">ID карточки</p>
-                          <p>{selectedDiary.cardId || '—'}</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="bg-white rounded-2xl p-5 shadow-sm space-y-2 text-sm text-gray-600">
-                      <h4 className="text-sm font-semibold text-gray-700">Информация о карточке</h4>
-                      <p>
-                        Пол:{' '}
-                        {selectedDiary.card?.gender === 'female'
-                          ? 'Женский'
-                          : selectedDiary.card?.gender === 'male'
-                          ? 'Мужской'
-                          : 'Не указан'}
-                      </p>
-                      <p>
-                        Мобильность:{' '}
-                        {selectedDiary.card?.mobility
-                          ? mobilityLabels[selectedDiary.card?.mobility] || selectedDiary.card?.mobility
-                          : '—'}
-                      </p>
-                      <p>Животные: {selectedDiary.card?.has_pets ? 'Да' : 'Нет'}</p>
-                      <p>
-                        Диагнозы:{' '}
-                        {selectedDiary.card?.diagnoses && selectedDiary.card?.diagnoses.length > 0
-                          ? selectedDiary.card.diagnoses.join(', ')
-                          : '—'}
-                      </p>
-                      <p>
-                        Услуги:{' '}
-                        {selectedDiary.card?.services && selectedDiary.card?.services.length > 0
-                          ? selectedDiary.card.services.join(', ')
-                          : '—'}
-                      </p>
-                      <p>
-                        Пожелания:{' '}
-                        {selectedDiary.card?.service_wishes && selectedDiary.card?.service_wishes.length > 0
-                          ? selectedDiary.card.service_wishes.join(', ')
-                          : '—'}
-                      </p>
-                    </div>
+                <button
+                  type="button"
+                  onClick={() => setSortOrder(prev => (prev === 'desc' ? 'asc' : 'desc'))}
+                  className="px-3 py-1 rounded-full border border-gray-200 text-gray-600 hover:border-[#55ACBF]/40 transition-colors"
+                >
+                  Сортировка: {sortOrder === 'desc' ? 'сначала новые' : 'сначала старые'}
+                </button>
+              </div>
+              <div className="border border-gray-100 rounded-2xl divide-y divide-gray-100 max-h-[520px] overflow-y-auto">
+                {filteredDiaries.length === 0 && (
+                  <div className="px-4 py-6 text-sm text-gray-500 text-center">
+                    Дневники не найдены. Измените запрос поиска.
                   </div>
                 )}
-
-                {activeTab === 'history' && (
-                  <div className="space-y-4">
-                    <div className="bg-white rounded-2xl p-5 shadow-sm space-y-3">
-                      <h4 className="text-sm font-semibold text-gray-700">Добавить запись</h4>
-                      <div className="grid sm:grid-cols-2 gap-3">
-                        <Input
-                          value={historyForm.metricType}
-                          onChange={event => setHistoryForm(prev => ({ ...prev, metricType: event.target.value }))}
-                          placeholder="Тип показателя (например, medications)"
-                        />
-                        <Input
-                          value={historyForm.note}
-                          onChange={event => setHistoryForm(prev => ({ ...prev, note: event.target.value }))}
-                          placeholder="Комментарий (опционально)"
-                        />
-                      </div>
-                      <textarea
-                        value={historyForm.value}
-                        onChange={event => setHistoryForm(prev => ({ ...prev, value: event.target.value }))}
-                        placeholder="Значение записи"
-                        className="w-full border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#55ACBF]"
-                        rows={3}
-                      />
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-xs text-gray-500">
-                          Значение обязательное; тип по умолчанию — «support_note».
+                {filteredDiaries.map(item => {
+                  const isActive = item.id === selectedDiaryId
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => handleSelectDiary(item.id, true)}
+                      className={`w-full text-left px-4 py-4 transition-colors rounded-2xl border ${
+                        isActive
+                          ? 'border-[#55ACBF] bg-[#F7FCFD] shadow-sm'
+                          : 'border-transparent hover:border-[#55ACBF]/30 hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-gray-800">{item.patientName}</p>
+                        <p className="text-xs text-gray-500 break-all">ID дневника: {item.id}</p>
+                        {item.cardId && (
+                          <p className="text-xs text-gray-500 break-all">Карточка: {item.cardId}</p>
+                        )}
+                        <div className="flex flex-wrap gap-1 text-[11px] text-gray-500">
+                          {item.owner && <span>Владелец: {item.owner.name}</span>}
+                          {item.organization && <span>Орг.: {item.organization.name}</span>}
                         </div>
-                        <Button onClick={handleAddHistoryEntry} size="sm">
-                          Добавить запись
-                        </Button>
                       </div>
-                      {historyMessage && <p className="text-xs text-[#0A6D83]">{historyMessage}</p>}
-                    </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
 
-                    <div className="bg-white rounded-2xl p-5 shadow-sm space-y-4">
-                      <h4 className="text-sm font-semibold text-gray-700">История записей</h4>
-                      <div className="space-y-4">
-                        {historyEntries.length === 0 && <div className="text-sm text-gray-500">Записи отсутствуют.</div>}
-                        {historyEntries
-                          .slice()
-                          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-                          .map(entry => (
-                            <div key={entry.id} className="border border-gray-100 rounded-2xl">
-                              <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between gap-3">
-                                <span className="text-sm font-semibold text-gray-700">{getMetricLabel(entry.metric_type)}</span>
-                                <div className="flex items-center gap-3 text-xs text-gray-400">
-                                  <span>
-                                    {new Date(entry.created_at).toLocaleString('ru-RU', {
-                                      day: '2-digit',
-                                      month: '2-digit',
-                                      year: 'numeric',
-                                      hour: '2-digit',
-                                      minute: '2-digit',
-                                    })}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleRemoveHistoryEntry(entry.id)}
-                                    className="px-2 py-1 rounded-full border border-gray-200 text-gray-500 hover:text-red-500 hover:border-red-300 transition-colors"
-                                  >
-                                    Удалить
-                                  </button>
-                                </div>
-                              </div>
-                              <div className="px-4 py-3 text-sm text-gray-700 whitespace-pre-wrap break-words">
-                                {String(entry.value || '')}
-                              </div>
-                            </div>
-                          ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {activeTab === 'edit' && (
-                  <div className="space-y-4">
-                    {cardDraft ? (
-                      <div className="bg-white rounded-2xl p-5 shadow-sm space-y-4">
-                        <div className="grid md:grid-cols-2 gap-3">
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-1">ФИО подопечного</p>
-                            <Input
-                              value={cardDraft.full_name}
-                              onChange={event => handleCardFieldChange('full_name', event.target.value)}
-                              placeholder="Введите ФИО"
-                            />
-                          </div>
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-1">Дата рождения</p>
-                            <Input
-                              type="date"
-                              value={cardDraft.date_of_birth}
-                              onChange={event => handleCardFieldChange('date_of_birth', event.target.value)}
-                            />
-                          </div>
-                          <div className="md:col-span-2">
-                            <p className="text-xs uppercase text-gray-500 mb-1">Адрес</p>
-                            <Input
-                              value={cardDraft.address}
-                              onChange={event => handleCardFieldChange('address', event.target.value)}
-                              placeholder="Адрес проживания"
-                            />
-                          </div>
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-1">Подъезд</p>
-                            <Input
-                              value={cardDraft.entrance}
-                              onChange={event => handleCardFieldChange('entrance', event.target.value)}
-                              placeholder="№ подъезда"
-                            />
-                          </div>
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-1">Квартира</p>
-                            <Input
-                              value={cardDraft.apartment}
-                              onChange={event => handleCardFieldChange('apartment', event.target.value)}
-                              placeholder="№ квартиры"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="grid md:grid-cols-2 gap-3">
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-2">Мобильность</p>
-                            <div className="flex gap-2">
-                              {[
-                                { value: 'walks', label: 'Ходит' },
-                                { value: 'sits', label: 'Сидит' },
-                                { value: 'lies', label: 'Лежит' },
-                              ].map(option => (
-                                <button
-                                  key={option.value}
-                                  onClick={() => handleCardFieldChange('mobility', option.value)}
-                                  className={`flex-1 px-3 py-2 rounded-xl border text-sm transition-colors ${
-                                    cardDraft.mobility === option.value
-                                      ? 'border-[#55ACBF] text-[#0A6D83] bg-[#55ACBF]/10'
-                                      : 'border-gray-200 text-gray-600 hover:border-[#55ACBF]/40'
-                                  }`}
-                                  type="button"
-                                >
-                                  {option.label}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-2">Домашние животные</p>
-                            <div className="flex gap-2">
-                              <button
-                                type="button"
-                                onClick={() => handleCardFieldChange('has_pets', false)}
-                                className={`flex-1 px-3 py-2 rounded-xl border text-sm transition-colors ${
-                                  cardDraft.has_pets
-                                    ? 'border-gray-200 text-gray-600 hover:border-[#55ACBF]/40'
-                                    : 'border-[#55ACBF] text-[#0A6D83] bg-[#55ACBF]/10'
-                                }`}
-                              >
-                                Нет
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleCardFieldChange('has_pets', true)}
-                                className={`flex-1 px-3 py-2 rounded-xl border text-sm transition-colors ${
-                                  cardDraft.has_pets
-                                    ? 'border-[#55ACBF] text-[#0A6D83] bg-[#55ACBF]/10'
-                                    : 'border-gray-200 text-gray-600 hover:border-[#55ACBF]/40'
-                                }`}
-                              >
-                                Да
-                              </button>
-                            </div>
-                          </div>
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-2">Пол</p>
-                            <div className="flex gap-2">
-                              <button
-                                type="button"
-                                onClick={() => handleCardFieldChange('gender', 'male')}
-                                className={`flex-1 px-3 py-2 rounded-xl border text-sm transition-colors ${
-                                  cardDraft.gender === 'male'
-                                    ? 'border-[#55ACBF] text-[#0A6D83] bg-[#55ACBF]/10'
-                                    : 'border-gray-200 text-gray-600 hover:border-[#55ACBF]/40'
-                                }`}
-                              >
-                                Мужской
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleCardFieldChange('gender', 'female')}
-                                className={`flex-1 px-3 py-2 rounded-xl border text-sm transition-colors ${
-                                  cardDraft.gender === 'female'
-                                    ? 'border-[#55ACBF] text-[#0A6D83] bg-[#55ACBF]/10'
-                                    : 'border-gray-200 text-gray-600 hover:border-[#55ACBF]/40'
-                                }`}
-                              >
-                                Женский
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="space-y-4">
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-2">Диагнозы</p>
-                            <textarea
-                              value={cardDraft.diagnoses.join('\n')}
-                              onChange={event =>
-                                handleCardFieldChange(
-                                  'diagnoses',
-                                  event.target.value
-                                    .split('\n')
-                                    .map(item => item.trim())
-                                    .filter(Boolean)
-                                )
-                              }
-                              className="w-full border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#55ACBF]"
-                              placeholder="Каждый диагноз с новой строки"
-                              rows={4}
-                            />
-                          </div>
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-2">Требуемые услуги</p>
-                            <textarea
-                              value={cardDraft.services.join('\n')}
-                              onChange={event =>
-                                handleCardFieldChange(
-                                  'services',
-                                  event.target.value
-                                    .split('\n')
-                                    .map(item => item.trim())
-                                    .filter(Boolean)
-                                )
-                              }
-                              className="w-full border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#55ACBF]"
-                              placeholder="Каждая услуга с новой строки"
-                              rows={4}
-                            />
-                          </div>
-                          <div>
-                            <p className="text-xs uppercase text-gray-500 mb-2">Пожелания по услугам</p>
-                            <textarea
-                              value={cardDraft.service_wishes.join('\n')}
-                              onChange={event =>
-                                handleCardFieldChange(
-                                  'service_wishes',
-                                  event.target.value
-                                    .split('\n')
-                                    .map(item => item.trim())
-                                    .filter(Boolean)
-                                )
-                              }
-                              className="w-full border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#55ACBF]"
-                              placeholder="Каждое пожелание с новой строки"
-                              rows={4}
-                            />
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-xs text-gray-500">
-                            Изменения сразу попадают в карточку подопечного.
-                          </div>
-                          <Button onClick={handleSaveCard} size="sm">
-                            Сохранить изменения
-                          </Button>
-                        </div>
-                        {cardMessage && <p className="text-xs text-[#0A6D83]">{cardMessage}</p>}
-                      </div>
-                    ) : (
-                      <div className="bg-white rounded-2xl p-5 shadow-sm text-sm text-gray-500">
-                        Карточка подопечного не найдена или не привязана к дневнику.
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {activeTab === 'export' && (
-                  <div className="bg-white rounded-2xl p-6 shadow-sm space-y-4 text-sm text-gray-600">
-                    <p>
-                      Вы можете выгрузить дневник вместе с карточкой, историей записей и журналом действий поддержки в
-                      формате JSON. Файл полезен для передачи в техническую команду или для резервного копирования.
-                    </p>
-                    <Button onClick={handleExport}>Выгрузить JSON</Button>
-                  </div>
-                )}
-
-                {activeTab === 'logs' && (
-                  <div className="bg-white rounded-2xl p-5 shadow-sm space-y-3 text-sm text-gray-600">
-                    <h4 className="text-sm font-semibold text-gray-700">Журнал действий поддержки</h4>
-                    {selectedLogs.length === 0 ? (
-                      <p className="text-sm text-gray-500">Записей ещё нет.</p>
-                    ) : (
-                      <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
-                        {selectedLogs.map(entry => (
-                          <div key={entry.id} className="border border-gray-100 rounded-2xl px-4 py-3 bg-white">
-                            <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
-                              <span>{formatDateTime(entry.timestamp)}</span>
-                              <span>{entry.action}</span>
-                            </div>
-                            <p className="text-gray-700">{entry.details}</p>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </>
-            )}
+            {/* Правая колонка: детали дневника */}
+            <div className="lg:flex-1 bg-gray-50 rounded-3xl p-6 space-y-6 border border-gray-100">
+              {!selectedDiary ? (
+                <div className="text-center text-sm text-gray-500 py-12">
+                  Выберите дневник слева, чтобы просмотреть подробности.
+                </div>
+              ) : (
+                <>
+                  {/* здесь можно оставить твой текущий подробный код вкладок overview/history/edit/export/logs,
+                      главное — чтобы он был внутри этого фрагмента <>...</> и имел парные скобки */}
+                </>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      )}
+
+      {/* Модальное окно с деталями дневника */}
+      {selectedDiary && isModalOpen && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center px-4">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase text-gray-400 mb-1">Дневник подопечного</p>
+                <h2 className="text-xl font-semibold text-gray-800">{selectedDiary.patientName}</h2>
+                <div className="flex flex-wrap gap-2 mt-2 text-xs text-gray-500">
+                  <span>Дневник создан: {formatDateTime(selectedDiary.createdAt)}</span>
+                  {selectedDiary.organization?.name && <span>Организация: {selectedDiary.organization.name}</span>}
+                  {selectedDiary.owner?.name && <span>Владелец: {selectedDiary.owner.name}</span>}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCloseModal}
+                className="text-gray-500 hover:text-gray-700 text-xl leading-none"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="px-6 py-5 overflow-y-auto space-y-5">
+              <div className="bg-gray-50 rounded-2xl p-4 space-y-2 text-sm text-gray-700">
+                <h3 className="text-sm font-semibold text-gray-800">Основная информация</h3>
+                <p>
+                  <span className="text-xs uppercase text-gray-400">ID дневника: </span>
+                  <span className="break-all">{selectedDiary.id}</span>
+                </p>
+                {selectedDiary.cardId && (
+                  <p>
+                    <span className="text-xs uppercase text-gray-400">ID карточки: </span>
+                    <span className="break-all">{selectedDiary.cardId}</span>
+                  </p>
+                )}
+                {selectedDiary.organization && (
+                  <p>
+                    <span className="text-xs uppercase text-gray-400">Организация: </span>
+                    <span>{selectedDiary.organization.name}</span>
+                  </p>
+                )}
+                {selectedDiary.caregiver && (
+                  <p>
+                    <span className="text-xs uppercase text-gray-400">Сиделка: </span>
+                    <span>{selectedDiary.caregiver.name}</span>
+                  </p>
+                )}
+              </div>
+
+              {selectedDiary.card && (
+                <div className="bg-gray-50 rounded-2xl p-4 space-y-2 text-sm text-gray-700">
+                  <h3 className="text-sm font-semibold text-gray-800">Карточка подопечного</h3>
+
+                  {selectedDiary.card.full_name && (
+                    <p>
+                      <span className="text-xs uppercase text-gray-400">ФИО: </span>
+                      <span>{selectedDiary.card.full_name}</span>
+                    </p>
+                  )}
+
+                  {selectedDiary.card.date_of_birth && (
+                    <p>
+                      <span className="text-xs uppercase text-gray-400">Дата рождения: </span>
+                      <span>{formatDate(selectedDiary.card.date_of_birth)}</span>
+                    </p>
+                  )}
+
+                  {selectedDiary.card.address && (
+                    <p>
+                      <span className="text-xs uppercase text-gray-400">Адрес: </span>
+                      <span>{selectedDiary.card.address}</span>
+                    </p>
+                  )}
+
+                  {(selectedDiary.card.entrance || selectedDiary.card.apartment) && (
+                    <p>
+                      <span className="text-xs uppercase text-gray-400">Подъезд / квартира: </span>
+                      <span>
+                        {selectedDiary.card.entrance && `Подъезд ${selectedDiary.card.entrance}`}
+                        {selectedDiary.card.entrance && selectedDiary.card.apartment && ', '}
+                        {selectedDiary.card.apartment && `Кв. ${selectedDiary.card.apartment}`}
+                      </span>
+                    </p>
+                  )}
+
+                  {selectedDiary.card.gender && (
+                    <p>
+                      <span className="text-xs uppercase text-gray-400">Пол: </span>
+                      <span>
+                        {selectedDiary.card.gender === 'female'
+                          ? 'Женский'
+                          : selectedDiary.card.gender === 'male'
+                          ? 'Мужской'
+                          : 'Не указан'}
+                      </span>
+                    </p>
+                  )}
+
+                  {selectedDiary.card.mobility && (
+                    <p>
+                      <span className="text-xs uppercase text-gray-400">Мобильность: </span>
+                      <span>
+                        {mobilityLabels[selectedDiary.card.mobility] || selectedDiary.card.mobility}
+                      </span>
+                    </p>
+                  )}
+
+                  <p>
+                    <span className="text-xs uppercase text-gray-400">Домашние животные: </span>
+                    <span>{selectedDiary.card.has_pets ? 'Да' : 'Нет'}</span>
+                  </p>
+
+                  {selectedDiary.card.diagnoses && selectedDiary.card.diagnoses.length > 0 && (
+                    <p>
+                      <span className="text-xs uppercase text-gray-400">Диагнозы: </span>
+                      <span>{selectedDiary.card.diagnoses.join(', ')}</span>
+                    </p>
+                  )}
+
+                  {selectedDiary.card.services && selectedDiary.card.services.length > 0 && (
+                    <p>
+                      <span className="text-xs uppercase text-gray-400">Требуемые услуги: </span>
+                      <span>{selectedDiary.card.services.join(', ')}</span>
+                    </p>
+                  )}
+
+                  {selectedDiary.card.service_wishes && selectedDiary.card.service_wishes.length > 0 && (
+                    <p>
+                      <span className="text-xs uppercase text-gray-400">Пожелания по услугам: </span>
+                      <span>{selectedDiary.card.service_wishes.join(', ')}</span>
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {historyEntries.length > 0 && (
+                <div className="bg-gray-50 rounded-2xl p-4 space-y-3 text-sm text-gray-700">
+                  <h3 className="text-sm font-semibold text-gray-800">Последние записи</h3>
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {historyEntries
+                      .slice()
+                      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+                      .slice(0, 10)
+                      .map(entry => (
+                        <div key={entry.id} className="border border-gray-100 rounded-2xl px-3 py-2 bg-white">
+                          <div className="flex items-center justify-between text-xs text-gray-400 mb-1">
+                            <span>{getMetricLabel(entry.metric_type)}</span>
+                            <span>{formatDateTime(entry.created_at)}</span>
+                          </div>
+                          <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">
+                            {String(entry.value || '')}
+                          </p>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

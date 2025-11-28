@@ -114,9 +114,7 @@ export const LoginPage = () => {
           }
         }
         
-        // Преобразуем телефон в email формат для Supabase
-        // Формат должен совпадать с форматом из Edge Function: organization_employee-xxx@diary.local
-        // В Edge Function: normalizePhone убирает все кроме цифр и плюса, затем buildPseudoEmail убирает все кроме цифр
+        // Нормализуем телефон (убираем все кроме цифр)
         const sanitizedPhone = formattedPhone.replace(/[^0-9]/g, '')
         
         console.log('LoginPage: Phone normalization:', {
@@ -125,14 +123,82 @@ export const LoginPage = () => {
           sanitized: sanitizedPhone,
         })
         
-        // Пробуем разные варианты формата (сотрудник, клиент организации, клиент сиделки)
+        // Сначала пытаемся найти пользователя по телефону через RPC
+        try {
+          console.log('LoginPage: Searching user by phone:', sanitizedPhone)
+          const { data: userData, error: findError } = await supabase.rpc('find_user_email_by_phone', {
+            p_phone: sanitizedPhone
+          })
+          
+          if (findError) {
+            console.error('LoginPage: RPC find_user_email_by_phone error:', findError)
+          } else {
+            console.log('LoginPage: RPC find_user_email_by_phone result:', userData)
+          }
+          
+          if (!findError && userData && userData.length > 0) {
+            const foundUser = userData[0]
+            console.log('LoginPage: ✅ Found user by phone:', {
+              user_id: foundUser.user_id,
+              email: foundUser.email,
+              user_role: foundUser.user_role,
+              organization_type: foundUser.organization_type
+            })
+            
+            // Пытаемся войти с найденным email
+            const result = await supabase.auth.signInWithPassword({
+              email: foundUser.email,
+              password: data.password,
+            })
+            
+            if (!result.error && result.data.user) {
+              console.log('LoginPage: ✅ Successfully logged in as:', result.data.user.email)
+              // Обновляем authStore
+              const { setUser, setSession } = useAuthStore.getState()
+              setUser(result.data.user)
+              setSession(result.data.session)
+              
+              // Обрабатываем pending токены доступа к дневникам через бэкенд
+              try {
+                const { data: processResult, error: processError } = await supabase.rpc('process_pending_diary_access', {
+                  p_user_id: result.data.user.id
+                })
+                
+                if (!processError && processResult?.success_count > 0) {
+                  console.log('[LoginPage] Обработано pending токенов:', processResult.success_count)
+                  // Инвалидируем кэш для dashboard, чтобы дневники появились
+                  await queryClient.invalidateQueries({ queryKey: ['dashboard-diaries'] })
+                }
+              } catch (error) {
+                console.error('[LoginPage] Ошибка обработки pending токенов:', error)
+              }
+              
+              // Перенаправление на главную страницу
+              navigate('/dashboard')
+              return
+            } else {
+              // Пользователь найден, но пароль неверный
+              console.error('LoginPage: ❌ User found but password incorrect:', result.error)
+              throw result.error || new Error('Неверный пароль')
+            }
+          } else {
+            console.log('LoginPage: No user found by phone, trying fallback method')
+          }
+        } catch (rpcError: any) {
+          console.error('LoginPage: RPC find_user_email_by_phone exception:', rpcError)
+          // Продолжаем с fallback методом
+        }
+        
+        // Если RPC не нашел пользователя, пробуем старый способ (для обратной совместимости)
+        // Пробуем разные варианты формата (администратор, сотрудник, клиент организации, клиент сиделки)
         const emailVariants = [
+          `admin-${sanitizedPhone}@diary.local`,
           `organization_employee-${sanitizedPhone}@diary.local`,
           `organization_client-${sanitizedPhone}@diary.local`,
           `caregiver_client-${sanitizedPhone}@diary.local`,
         ]
         
-        console.log('LoginPage: Trying email variants:', emailVariants)
+        console.log('LoginPage: Trying email variants (fallback):', emailVariants)
         
         let lastError: any = null
         for (const email of emailVariants) {

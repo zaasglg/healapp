@@ -8,6 +8,27 @@ import { Button, Input } from '@/components/ui'
 import { PinnedMetricPanel } from '@/components/PinnedMetricPanel'
 import type { MetricFillData } from '@/components/MetricFillModal'
 import type { DiaryClientLink } from '@/utils/diaryClientLink'
+import { canEditDiariesAndCards, canManageClientAccess, canManageEmployeeAccess, canEditDiaryMetrics } from '@/utils/employeePermissions'
+
+// Хук для отслеживания размера экрана
+const useWindowWidth = () => {
+  const [width, setWidth] = useState<number>(() => 
+    typeof window !== 'undefined' ? window.innerWidth : 1920
+  )
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+
+    const handleResize = () => {
+      setWidth(window.innerWidth)
+    }
+
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  return width
+}
 
 interface PatientCard {
   id: string
@@ -212,8 +233,8 @@ const loadDiaryHistoryEntries = async (diaryId: string, date?: string): Promise<
 
     if (error) {
       console.error('Ошибка загрузки истории:', error)
-      return []
-    }
+    return []
+  }
 
     // Преобразуем данные из Supabase в формат DiaryMetricValue
     // Функция возвращает: event_type, payload, recorded_by, occurred_at
@@ -397,6 +418,15 @@ const MOBILITY_OPTIONS = [
 ]
 
 const getMetricConfig = (metricType: string): MetricModalConfig => {
+  // Для пользовательских метрик (начинающихся с custom_) используем текстовый ввод
+  if (metricType.startsWith('custom_')) {
+    return {
+      variant: 'text',
+      description: 'Запишите значение показателя.',
+      placeholder: 'Введите значение',
+    }
+  }
+  
   const defaultConfig: MetricModalConfig = {
     variant: 'boolean',
     description: 'Зафиксируйте состояние показателя.',
@@ -792,11 +822,12 @@ const MetricValueModal = ({ isOpen, metricType, metricLabel, onClose, onSave }: 
 
         {config.variant === 'text' && (
           <div className="space-y-3">
-            <textarea
+            <Input
+              type="text"
               value={textValue}
               onChange={event => setTextValue(event.target.value)}
-              placeholder={config.placeholder || 'Добавьте описание'}
-              className="w-full min-h-[92px] rounded-2xl border border-gray-200 px-4 py-3 text-sm focus:border-[#7DD3DC] focus:outline-none"
+              placeholder={config.placeholder || 'Введите значение'}
+              className="w-full"
             />
           </div>
         )}
@@ -919,6 +950,8 @@ export const DiaryPage = () => {
       user?.user_metadata?.caregiver_id ||
       (user as any)?.caregiver_id
   )
+  // Для организаций: если userOrganizationId не найден, пытаемся получить из таблицы organizations
+  // Для сотрудников: получаем из organization_employees (будет загружено асинхронно)
   const effectiveOrganizationId = userOrganizationId || (isOrganizationAccount ? userId : null)
 
   const defaultHistoryDate = useMemo(() => toInputDate(new Date()), [])
@@ -957,6 +990,8 @@ export const DiaryPage = () => {
   }>>([])
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [settingsSection, setSettingsSection] = useState<'card' | 'metrics' | 'access'>('card')
+  const windowWidth = useWindowWidth()
+  const isSmallScreen = windowWidth < 388
   const assignmentOrganizationType = useMemo(
     () =>
       organizationType ||
@@ -1078,6 +1113,70 @@ export const DiaryPage = () => {
     return userCaregiverId || (isCaregiver ? caregiverOrganizationId : null)
   }, [userCaregiverId, isCaregiver, caregiverOrganizationId])
 
+  // Загружаем organization_id для сотрудников из organization_employees
+  const [employeeOrganizationId, setEmployeeOrganizationId] = useState<string | null>(null)
+  // Загружаем organization_id для организаций из таблицы organizations
+  const [loadedOrganizationId, setLoadedOrganizationId] = useState<string | null>(null)
+  
+  useEffect(() => {
+    if (!userId) {
+      setEmployeeOrganizationId(null)
+      setLoadedOrganizationId(null)
+      return
+    }
+
+    const loadOrgIds = async () => {
+      // Для сотрудников загружаем organization_id из organization_employees
+      if (isOrgEmployee) {
+        try {
+          const { data: employeeData, error: employeeError } = await supabase
+            .from('organization_employees')
+            .select('organization_id')
+            .eq('user_id', userId)
+            .maybeSingle()
+          
+          if (!employeeError && employeeData?.organization_id) {
+            setEmployeeOrganizationId(employeeData.organization_id)
+            console.log('[DiaryPage] Loaded employee organization_id:', employeeData.organization_id)
+          }
+        } catch (error) {
+          console.error('[DiaryPage] Error loading employee organization_id:', error)
+        }
+      }
+      
+      // Для организаций загружаем organization_id из organizations, если его нет в metadata
+      if (isOrganizationAccount && !userOrganizationId) {
+        try {
+          const { data: orgData, error: orgError } = await supabase
+            .from('organizations')
+            .select('id')
+            .eq('user_id', userId)
+            .maybeSingle()
+          
+          if (!orgError && orgData?.id) {
+            setLoadedOrganizationId(orgData.id)
+            console.log('[DiaryPage] Loaded organization_id from organizations table:', orgData.id)
+          }
+        } catch (error) {
+          console.error('[DiaryPage] Error loading organization_id:', error)
+        }
+      }
+    }
+
+    loadOrgIds()
+  }, [isOrgEmployee, isOrganizationAccount, userId, userOrganizationId])
+
+  // Обновляем effectiveOrganizationId с учетом загруженного organization_id для сотрудников и организаций
+  const finalEffectiveOrganizationId = useMemo(() => {
+    if (isOrgEmployee && employeeOrganizationId) {
+      return employeeOrganizationId
+    }
+    if (isOrganizationAccount && loadedOrganizationId) {
+      return loadedOrganizationId
+    }
+    return effectiveOrganizationId
+  }, [isOrgEmployee, isOrganizationAccount, employeeOrganizationId, loadedOrganizationId, effectiveOrganizationId])
+
   // Загрузка ссылок для клиентов из Supabase
   useEffect(() => {
     if (!id) return
@@ -1115,21 +1214,21 @@ export const DiaryPage = () => {
             client_id: clientLink.client_id || null,
           }
 
-          setOrganizationClientLink(normalized)
-          updateAttachedClientInfo(normalized)
-        } else {
+            setOrganizationClientLink(normalized)
+            updateAttachedClientInfo(normalized)
+          } else {
+            setOrganizationClientLink(null)
+            setAttachedClient(null)
+          }
+      } catch (error) {
+        console.error('Ошибка загрузки ссылки для клиента:', error)
           setOrganizationClientLink(null)
           setAttachedClient(null)
         }
-      } catch (error) {
-        console.error('Ошибка загрузки ссылки для клиента:', error)
-        setOrganizationClientLink(null)
-        setAttachedClient(null)
-      }
     }
 
     loadClientLinks()
-  }, [id, diary?.patient_card_id, diary?.organization_id, effectiveOrganizationId])
+  }, [id, diary?.patient_card_id, diary?.organization_id, effectiveOrganizationId, finalEffectiveOrganizationId, employeeOrganizationId, isOrgEmployee])
 
   // Загрузка приглашенных клиентов
   useEffect(() => {
@@ -1139,14 +1238,29 @@ export const DiaryPage = () => {
       console.log('[DiaryPage] Пропуск загрузки клиентов: нет id')
       return
     }
-    if (!isOrganization) {
-      console.log('[DiaryPage] Пропуск загрузки клиентов: не организация', { isOrganization, organizationType })
+    // Загружаем для организаций и руководителей с правами на управление клиентами
+    // Проверяем права внутри функции loadInvitedClients, так как employeePermissions может быть еще не загружен
+    if (!isOrganization && !isOrgEmployee) {
+      console.log('[DiaryPage] Пропуск загрузки клиентов: не организация и не сотрудник', { isOrganization, isOrgEmployee, organizationType })
       return
     }
 
     const loadInvitedClients = async () => {
       try {
-        console.log('[DiaryPage] Загрузка приглашенных клиентов для дневника:', id, 'organization_id:', effectiveOrganizationId)
+        // Для руководителей проверяем права на управление клиентами
+        if (isOrgEmployee && !employeePermissions.canManageClientAccess) {
+          console.log('[DiaryPage] Пропуск загрузки клиентов: руководитель без прав на управление клиентами')
+          setInvitedClients([])
+          return
+        }
+        
+        // Определяем organization_id для загрузки клиентов
+        // Для руководителей используем employeeOrganizationId или finalEffectiveOrganizationId
+        const orgIdForLoading = isOrgEmployee 
+          ? (employeeOrganizationId || finalEffectiveOrganizationId || diary?.organization_id)
+          : (diary?.organization_id || effectiveOrganizationId)
+        
+        console.log('[DiaryPage] Загрузка приглашенных клиентов для дневника:', id, 'organization_id:', orgIdForLoading)
         
         // Сначала загружаем diary_client_links напрямую - это основной источник данных
         const { data: clientLinks, error: linksError } = await supabase
@@ -1237,9 +1351,14 @@ export const DiaryPage = () => {
               
               // Проверяем organization_id только если приглашение НЕ для текущего дневника
               // ИЛИ если organization_id совпадает
-              const orgMatches = !effectiveOrganizationId || 
+              // Используем правильный organization_id для руководителей
+              const orgIdForCheck = isOrgEmployee 
+                ? (employeeOrganizationId || finalEffectiveOrganizationId || diary?.organization_id || effectiveOrganizationId)
+                : (diary?.organization_id || effectiveOrganizationId)
+              
+              const orgMatches = !orgIdForCheck || 
                 !clientInviteData.organization_id || 
-                clientInviteData.organization_id === effectiveOrganizationId
+                clientInviteData.organization_id === orgIdForCheck
               
               if (isForCurrentDiary || orgMatches) {
                 inviteTokensMap.set(invite.token, {
@@ -1263,7 +1382,7 @@ export const DiaryPage = () => {
                     diary_id: clientInviteData.diary_id,
                     isForCurrentDiary,
                   })
-                } else {
+    } else {
                   console.log('[DiaryPage] ⚠️ Приглашение не использовано или нет used_by:', {
                     token: invite.token,
                     used_at: invite.used_at,
@@ -1321,10 +1440,15 @@ export const DiaryPage = () => {
                 const clientData = userIdToClientMap.get(inviteData.used_by)
                 if (clientData) {
                   // Проверяем, что клиент действительно был приглашен этой организацией
-                  const orgIdMatches = !effectiveOrganizationId || 
+                  // Используем правильный organization_id для руководителей
+                  const orgIdForCheck = isOrgEmployee 
+                    ? (employeeOrganizationId || finalEffectiveOrganizationId || diary?.organization_id || effectiveOrganizationId)
+                    : (diary?.organization_id || effectiveOrganizationId)
+                  
+                  const orgIdMatches = !orgIdForCheck || 
                     !inviteData.organization_id || 
-                    inviteData.organization_id === effectiveOrganizationId ||
-                    clientData.invited_by_organization_id === effectiveOrganizationId
+                    inviteData.organization_id === orgIdForCheck ||
+                    clientData.invited_by_organization_id === orgIdForCheck
                   
                   if (orgIdMatches) {
                     // Обновляем linksMap, если запись существует, или создаем новую
@@ -1578,7 +1702,7 @@ export const DiaryPage = () => {
     }
 
     loadInvitedClients()
-  }, [id, isOrganization, effectiveOrganizationId, organizationClientLink?.accepted_by]) // Перезагружаем при изменении статуса клиента
+  }, [id, isOrganization, isOrgEmployee, effectiveOrganizationId, finalEffectiveOrganizationId, employeeOrganizationId, diary?.organization_id, organizationClientLink?.accepted_by]) // Перезагружаем при изменении статуса клиента
 
   // Загрузка внешних ссылок из Supabase
   useEffect(() => {
@@ -1707,22 +1831,46 @@ export const DiaryPage = () => {
     }
     
     // Для организаций: проверяем organization_id или created_by (кто создал дневник)
+    // Используем finalEffectiveOrganizationId для более точного определения
     const organizationAccountAccess =
       isOrganizationAccount &&
-      (matches(diary.organization_id, effectiveOrganizationId) ||
+      (matches(diary.organization_id, finalEffectiveOrganizationId || effectiveOrganizationId) ||
         matches(diary.organization_id, userId) ||
-        (!diary.organization_id && matches(diary.owner_id, effectiveOrganizationId)) ||
+        (!diary.organization_id && matches(diary.owner_id, finalEffectiveOrganizationId || effectiveOrganizationId)) ||
         (!diary.organization_id && matches(diary.owner_id, userId)))
     const assignedEmployeeIds = assignedEmployees.map(employee => employee.user_id)
     // Для патронажных агентств требуется явное назначение через diary_employee_access
     // Для пансионатов доступ ко всем дневникам организации автоматически (без явного назначения)
+    // ВАЖНО: Администраторы и руководители имеют доступ ко всем дневникам организации независимо от назначения
     const requiresAssignment = assignmentOrganizationType === 'patronage_agency'
+    
+    // Проверяем, является ли сотрудник администратором или руководителем
+    // Проверяем как в assignedEmployees, так и в availableOrgEmployees (для пансионатов)
+    let isAdminOrManager = false
+    if (isOrgEmployee && userId) {
+      // Сначала проверяем в assignedEmployees
+      const employee = assignedEmployees.find(emp => emp.user_id === userId)
+      if (employee && (employee.role === 'admin' || employee.role === 'manager')) {
+        isAdminOrManager = true
+      } else {
+        // Если не найден в assignedEmployees, проверяем в availableOrgEmployees
+        const availableEmployee = availableOrgEmployees.find(emp => emp.user_id === userId)
+        if (availableEmployee && (availableEmployee.role === 'admin' || availableEmployee.role === 'manager')) {
+          isAdminOrManager = true
+        }
+      }
+    }
+    
     const hasEmployeeAssignment =
-      !requiresAssignment || (userId ? assignedEmployeeIds.includes(userId) : false)
+      !requiresAssignment || 
+      isAdminOrManager || // Администраторы и руководители всегда имеют доступ
+      (userId ? assignedEmployeeIds.includes(userId) : false)
+    // Для сотрудников: проверяем доступ через organization_id из дневника или через userOrganizationId/employeeOrganizationId
+    // employeeOrganizationId загружается из organization_employees
     const organizationEmployeeAccess =
       isOrgEmployee &&
-      (matches(diary.organization_id, userOrganizationId || effectiveOrganizationId) ||
-        (!diary.organization_id && matches(diary.owner_id, userOrganizationId || effectiveOrganizationId))) &&
+      (matches(diary.organization_id, employeeOrganizationId || userOrganizationId || finalEffectiveOrganizationId || effectiveOrganizationId) ||
+        (!diary.organization_id && matches(diary.owner_id, employeeOrganizationId || userOrganizationId || finalEffectiveOrganizationId || effectiveOrganizationId))) &&
       hasEmployeeAssignment
     const caregiverAccess =
       (isCaregiver || !!effectiveCaregiverId) && matches(diary.caregiver_id, effectiveCaregiverId)
@@ -1751,24 +1899,30 @@ export const DiaryPage = () => {
       organizationEmployeeAccess,
       caregiverAccess,
       canManageDiarySettings: isOwner || organizationAccountAccess,
-      canEditCardSettings: isOwner || isClientAccess,
+      // Администраторы и руководители могут редактировать карточку через organizationAccountAccess или organizationEmployeeAccess
+      canEditCardSettings: isOwner || isClientAccess || organizationAccountAccess,
       // ВАЖНО: Сиделки могут редактировать показатели (заполнять и просматривать)
+      // Администраторы и руководители также могут редактировать показатели
       canManageMetricsSettings: isOwner || isClientAccess || organizationAccountAccess || caregiverAccess,
-      canManageAccessSettings: isOwner || isClientAccess,
+      canManageAccessSettings: isOwner || isClientAccess || organizationAccountAccess,
     }
   }, [
     diary,
     userId,
     userRole, // ВАЖНО: добавляем userRole в зависимости, чтобы accessState пересчитывался при изменении роли
     effectiveOrganizationId,
+    finalEffectiveOrganizationId, // Используем finalEffectiveOrganizationId для сотрудников
     userOrganizationId,
+    employeeOrganizationId, // Добавляем для сотрудников
     effectiveCaregiverId,
     caregiverOrganizationId, // Добавляем caregiverOrganizationId в зависимости
     isOrganizationAccount,
     isOrgEmployee,
     isCaregiver,
     assignedEmployees,
+    availableOrgEmployees, // Добавляем для проверки роли администратора/руководителя
     organizationType,
+    assignmentOrganizationType, // Добавляем для правильной проверки типа организации
     organizationClientLink, // Добавляем organizationClientLink для проверки доступа через приглашение
   ])
 
@@ -1856,33 +2010,58 @@ export const DiaryPage = () => {
       const assignments = await loadAssignedEmployees()
       normalizedAssignments = assignments || []
 
-      let employeesForOrganization: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> = []
+    let employeesForOrganization: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> = []
 
-      if (isOrganizationAccount) {
+      // Загружаем сотрудников для организаций и руководителей/администраторов
+      // Для руководителей загружаем всегда, не дожидаясь загрузки employeePermissions
+      if (isOrganizationAccount || isOrgEmployee) {
         try {
           // Загружаем organization_id из таблицы organizations по user_id
           // effectiveOrganizationId может быть user_id, а нам нужен organization_id
           let orgId = normalizeId(diary.organization_id)
           
-          // Если organization_id нет в дневнике, получаем его из таблицы organizations
-          if (!orgId && userId) {
-            const { data: orgData, error: orgError } = await supabase
-              .from('organizations')
-              .select('id')
-              .eq('user_id', userId)
-              .single()
-            
-            if (!orgError && orgData?.id) {
-              orgId = orgData.id
-              console.log('[DiaryPage] Loaded organization_id from organizations table:', orgId)
+          // Если organization_id нет в дневнике, получаем его
+          if (!orgId) {
+            // Для сотрудников используем уже загруженный employeeOrganizationId
+            if (isOrgEmployee && employeeOrganizationId) {
+              orgId = employeeOrganizationId
+              console.log('[DiaryPage] Using employeeOrganizationId:', orgId)
+            } else if (userId) {
+              // Для сотрудников получаем organization_id из organization_employees (если еще не загружен)
+              if (isOrgEmployee) {
+                const { data: employeeData, error: employeeError } = await supabase
+                  .from('organization_employees')
+                  .select('organization_id')
+                  .eq('user_id', userId)
+                  .maybeSingle()
+                
+                if (!employeeError && employeeData?.organization_id) {
+                  orgId = employeeData.organization_id
+                  console.log('[DiaryPage] Loaded organization_id from organization_employees:', orgId)
+                }
+              }
+              
+              // Если не нашли через organization_employees, пробуем через organizations
+              if (!orgId) {
+                const { data: orgData, error: orgError } = await supabase
+                  .from('organizations')
+                  .select('id')
+                  .eq('user_id', userId)
+                  .single()
+                
+                if (!orgError && orgData?.id) {
+                  orgId = orgData.id
+                  console.log('[DiaryPage] Loaded organization_id from organizations table:', orgId)
+        } else {
+                  // Fallback: используем finalEffectiveOrganizationId или effectiveOrganizationId
+                  orgId = normalizeId(finalEffectiveOrganizationId || effectiveOrganizationId)
+                  console.log('[DiaryPage] Using finalEffectiveOrganizationId/effectiveOrganizationId as fallback:', orgId)
+                }
+              }
             } else {
-              // Fallback: используем effectiveOrganizationId (может быть user_id)
-              orgId = normalizeId(effectiveOrganizationId)
-              console.log('[DiaryPage] Using effectiveOrganizationId as fallback:', orgId)
+              // Если нет userId, используем finalEffectiveOrganizationId или effectiveOrganizationId
+              orgId = normalizeId(finalEffectiveOrganizationId || effectiveOrganizationId)
             }
-          } else if (!orgId) {
-            // Если нет organization_id в дневнике, используем effectiveOrganizationId
-            orgId = normalizeId(effectiveOrganizationId)
           }
 
           if (orgId) {
@@ -1925,23 +2104,23 @@ export const DiaryPage = () => {
               userId
             })
           }
-        } catch (error) {
+      } catch (error) {
           console.error('[DiaryPage] Не удалось загрузить сотрудников организации', error)
-          employeesForOrganization = []
-        }
+        employeesForOrganization = []
       }
+    }
 
-      setAvailableOrgEmployees(employeesForOrganization)
+    setAvailableOrgEmployees(employeesForOrganization)
 
-      // Для пансионатов по умолчанию все сотрудники имеют доступ, если доступы не настроены явно.
+    // Для пансионатов по умолчанию все сотрудники имеют доступ, если доступы не настроены явно.
       // НО: не назначаем автоматически, если есть записи с revoked_at (значит доступы уже управлялись)
-      let assignmentsToPersist: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> | null =
-        null
+    let assignmentsToPersist: Array<{ user_id: string; first_name?: string; last_name?: string; role?: string }> | null =
+      null
       
       // Проверяем, есть ли записи в diary_employee_access (даже с revoked_at)
       // Если есть - значит доступы уже управлялись, не назначаем автоматически
       let hasAnyAccessRecords = false
-      if (isOrganizationAccount && assignmentOrganizationType === 'pension' && id) {
+      if ((isOrganizationAccount || isOrgEmployee) && assignmentOrganizationType === 'pension' && id) {
         const { data: anyAccessData } = await supabase
           .from('diary_employee_access')
           .select('user_id')
@@ -1952,29 +2131,29 @@ export const DiaryPage = () => {
       }
       
       if (
-        isOrganizationAccount &&
+        (isOrganizationAccount || isOrgEmployee) &&
         assignmentOrganizationType === 'pension' &&
-        normalizedAssignments.length === 0 &&
+      normalizedAssignments.length === 0 &&
         employeesForOrganization.length > 0 &&
         !hasAnyAccessRecords // Не назначаем автоматически, если доступы уже управлялись
-      ) {
-        normalizedAssignments = employeesForOrganization
-        assignmentsToPersist = employeesForOrganization
-        console.log('[DiaryPage] auto-assign all employees for pension', assignmentsToPersist)
-      } else if (isOrganizationAccount && employeesForOrganization.length > 0) {
-        // Удаляем из доступа сотрудников, которых больше нет в организации.
-        const filteredAssignments = normalizedAssignments.filter(assignment =>
-          employeesForOrganization.some(employee => employee.user_id === assignment.user_id)
-        )
-        if (filteredAssignments.length !== normalizedAssignments.length) {
-          normalizedAssignments = filteredAssignments
-          assignmentsToPersist = filteredAssignments
-          console.log('[DiaryPage] cleaned assignment list', { normalizedAssignments })
-        }
+    ) {
+      normalizedAssignments = employeesForOrganization
+      assignmentsToPersist = employeesForOrganization
+      console.log('[DiaryPage] auto-assign all employees for pension', assignmentsToPersist)
+      } else if ((isOrganizationAccount || isOrgEmployee) && employeesForOrganization.length > 0) {
+      // Удаляем из доступа сотрудников, которых больше нет в организации.
+      const filteredAssignments = normalizedAssignments.filter(assignment =>
+        employeesForOrganization.some(employee => employee.user_id === assignment.user_id)
+      )
+      if (filteredAssignments.length !== normalizedAssignments.length) {
+        normalizedAssignments = filteredAssignments
+        assignmentsToPersist = filteredAssignments
+        console.log('[DiaryPage] cleaned assignment list', { normalizedAssignments })
       }
+    }
 
-      if (assignmentsToPersist) {
-        try {
+    if (assignmentsToPersist) {
+      try {
           // Для пансионатов автоматически назначаем всех сотрудников через RPC
           if (assignmentOrganizationType === 'pension') {
             for (const employee of assignmentsToPersist) {
@@ -1988,17 +2167,17 @@ export const DiaryPage = () => {
               }
             }
           }
-        } catch (error) {
-          console.warn('Не удалось сохранить доступ сотрудников организации', error)
-        }
+      } catch (error) {
+        console.warn('Не удалось сохранить доступ сотрудников организации', error)
       }
+    }
 
-      setAssignedEmployees(normalizedAssignments)
-      setAssignmentsLoaded(true)
+    setAssignedEmployees(normalizedAssignments)
+    setAssignmentsLoaded(true)
     }
 
     loadData()
-  }, [diary, isOrganizationAccount, organizationType, effectiveOrganizationId])
+  }, [diary, isOrganizationAccount, isOrgEmployee, organizationType, effectiveOrganizationId, userId, id])
 
   useEffect(() => {
     if (!diary) return
@@ -2033,10 +2212,72 @@ export const DiaryPage = () => {
     organizationAccountAccess,
     organizationEmployeeAccess,
     caregiverAccess,
-    canEditCardSettings,
-    canManageMetricsSettings,
-    canManageAccessSettings,
+    canEditCardSettings: baseCanEditCardSettings,
+    canManageMetricsSettings: baseCanManageMetricsSettings,
+    canManageAccessSettings: baseCanManageAccessSettings,
   } = accessState
+
+  // Дополнительная проверка прав сотрудников
+  const [employeePermissions, setEmployeePermissions] = useState<{
+    canEditCard: boolean
+    canManageMetrics: boolean
+    canManageClientAccess: boolean
+    canManageEmployeeAccess: boolean
+  }>({
+    canEditCard: false,
+    canManageMetrics: false,
+    canManageClientAccess: false,
+    canManageEmployeeAccess: false,
+  })
+
+  useEffect(() => {
+    const checkEmployeePermissions = async () => {
+      if (!user || !isOrgEmployee) {
+        setEmployeePermissions({
+          canEditCard: false,
+          canManageMetrics: false,
+          canManageClientAccess: false,
+          canManageEmployeeAccess: false,
+        })
+        return
+      }
+
+      try {
+        const [canEdit, canManageClient, canManageEmployee, canEditMetrics] = await Promise.all([
+          canEditDiariesAndCards(user),
+          canManageClientAccess(user),
+          canManageEmployeeAccess(user),
+          canEditDiaryMetrics(user),
+        ])
+
+        setEmployeePermissions({
+          canEditCard: canEdit,
+          canManageMetrics: canEditMetrics, // Администраторы и руководители могут редактировать показатели
+          canManageClientAccess: canManageClient,
+          canManageEmployeeAccess: canManageEmployee,
+        })
+      } catch (error) {
+        console.error('Ошибка проверки прав сотрудника:', error)
+        setEmployeePermissions({
+          canEditCard: false,
+          canManageMetrics: false,
+          canManageClientAccess: false,
+          canManageEmployeeAccess: false,
+        })
+      }
+    }
+
+    checkEmployeePermissions()
+  }, [user, isOrgEmployee])
+
+  // Объединяем базовые права с правами сотрудников
+  const canEditCardSettings = baseCanEditCardSettings || (isOrgEmployee && employeePermissions.canEditCard)
+  const canManageMetricsSettings = baseCanManageMetricsSettings || (isOrgEmployee && employeePermissions.canManageMetrics)
+  // ВАЖНО: Для сотрудников доступ к управлению доступами определяется ТОЛЬКО через employeePermissions
+  // Админы НЕ должны иметь доступ к управлению доступами (только руководители)
+  const canManageAccessSettings = isOrgEmployee 
+    ? (employeePermissions.canManageClientAccess || employeePermissions.canManageEmployeeAccess)
+    : baseCanManageAccessSettings
 
   useEffect(() => {
     if (!diary) return
@@ -2155,8 +2396,8 @@ export const DiaryPage = () => {
     if (!diary) return
     // Сохранение идет через RPC assign_employee_to_diary / remove_employee_from_diary
     // localStorage больше не используется
-    console.log('[DiaryPage] persistAssignedEmployees', { diaryId: diary.id, next })
-    setAssignedEmployees(next)
+      console.log('[DiaryPage] persistAssignedEmployees', { diaryId: diary.id, next })
+      setAssignedEmployees(next)
   }
 
   // Функция для назначения доступа сотруднику
@@ -2195,8 +2436,8 @@ export const DiaryPage = () => {
       if (error) {
         console.error('Ошибка назначения доступа:', error)
         alert(error.message || 'Не удалось назначить доступ. Попробуйте позже.')
-        return
-      }
+      return
+    }
 
       // Перезагружаем список назначенных сотрудников из БД
       const updatedAssignments = await loadAssignedEmployees()
@@ -2269,9 +2510,9 @@ export const DiaryPage = () => {
         return
       }
 
-      // Обновляем состояние
-      setDiary({
-        ...diary,
+    // Обновляем состояние
+    setDiary({
+      ...diary,
         [updateField]: null
       })
 
@@ -2283,7 +2524,7 @@ export const DiaryPage = () => {
       } else if (accessType === 'organization') {
         // Очищаем информацию об организации
         setOrganizationInfo(null)
-        persistAssignedEmployees([])
+      persistAssignedEmployees([])
         // Удаляем ссылку клиента из Supabase при отзыве доступа организации
         try {
           const { error: deleteError } = await supabase
@@ -2293,15 +2534,15 @@ export const DiaryPage = () => {
 
           if (deleteError) {
             console.warn('Не удалось удалить ссылку клиента при отзыве доступа организации:', deleteError)
-          }
-        } catch (error) {
-          console.warn('Не удалось очистить ссылку клиента при удалении доступа организации', error)
         }
-        setOrganizationClientLink(null)
-        setAttachedClient(null)
+      } catch (error) {
+        console.warn('Не удалось очистить ссылку клиента при удалении доступа организации', error)
       }
+      setOrganizationClientLink(null)
+      setAttachedClient(null)
+    }
 
-      alert('Доступ успешно отозван')
+    alert('Доступ успешно отозван')
     } catch (error) {
       console.error('Ошибка отзыва доступа:', error)
       alert('Не удалось отозвать доступ. Попробуйте позже.')
@@ -2365,10 +2606,10 @@ export const DiaryPage = () => {
           }
           
           alert('Не удалось загрузить дневник. Попробуйте позже.')
-          navigate('/dashboard')
-          return
-        }
-
+      navigate('/dashboard')
+      return
+    }
+    
         // Преобразуем данные из Supabase в формат Diary
         const normalizedDiary: Diary = {
           id: diaryData.id,
@@ -2472,9 +2713,9 @@ export const DiaryPage = () => {
           const loadedSettings: Record<string, MetricSettings> = {}
           loadedMetrics.forEach((metric: DiaryMetric) => {
             if (metric.settings) {
-              loadedSettings[metric.metric_type] = normalizeSettings(metric.settings)
-            }
-          })
+        loadedSettings[metric.metric_type] = normalizeSettings(metric.settings)
+      }
+    })
           setMetricSettings(loadedSettings)
         }
       } catch (error) {
@@ -2567,7 +2808,7 @@ export const DiaryPage = () => {
                 p_user_email: user.email || null,
                 p_user_phone: user.user_metadata?.phone || null
               })
-            } catch (error) {
+    } catch (error) {
               console.error('[DiaryPage] Ошибка регистрации попытки:', error)
             }
             // Редиректим на страницу настройки профиля, если она еще не заполнена
@@ -2665,22 +2906,22 @@ export const DiaryPage = () => {
         if (linkError) {
           console.error('Ошибка проверки приглашения:', linkError)
           alert('Ошибка проверки ссылки приглашения')
-          navigate(`/diaries/${id}`, { replace: true })
-          return
-        }
+      navigate(`/diaries/${id}`, { replace: true })
+      return
+    }
 
         if (!clientLink) {
           alert('Ссылка приглашения недействительна или устарела')
-          navigate(`/diaries/${id}`, { replace: true })
-          return
-        }
+      navigate(`/diaries/${id}`, { replace: true })
+      return
+    }
 
         // Проверяем, не использована ли ссылка другим пользователем
         if (clientLink.accepted_by && clientLink.accepted_by !== user.id) {
-          alert('Эта ссылка уже была использована другим пользователем')
-          navigate(`/diaries/${id}`, { replace: true })
-          return
-        }
+      alert('Эта ссылка уже была использована другим пользователем')
+      navigate(`/diaries/${id}`, { replace: true })
+      return
+    }
 
         // Получаем client_id из таблицы clients
         const { data: clientData, error: clientError } = await supabase
@@ -2713,8 +2954,8 @@ export const DiaryPage = () => {
           console.error('Ошибка обновления diary_client_links:', updateError)
           alert('Ошибка при принятии приглашения')
           navigate(`/diaries/${id}`, { replace: true })
-          return
-        }
+      return
+    }
 
         // Edge Function уже обновил diaries.owner_client_id и patient_cards.client_id при регистрации
         // Перезагружаем данные дневника и карточки
@@ -2736,7 +2977,7 @@ export const DiaryPage = () => {
             .single()
 
           if (!cardError && updatedCard) {
-            setPatientCard(updatedCard as PatientCard)
+      setPatientCard(updatedCard as PatientCard)
           }
         }
 
@@ -2748,16 +2989,16 @@ export const DiaryPage = () => {
           diary_id: id,
           patient_card_id: diary.patient_card_id,
           organization_id: diary.organization_id ?? effectiveOrganizationId ?? null,
-          accepted_by: user.id,
-          accepted_at: new Date().toISOString(),
+      accepted_by: user.id,
+      accepted_at: new Date().toISOString(),
           client_id: clientId,
         }
 
-        setOrganizationClientLink(normalizedLink)
-        updateAttachedClientInfo(normalizedLink)
+    setOrganizationClientLink(normalizedLink)
+    updateAttachedClientInfo(normalizedLink)
 
-        alert('Дневник успешно привязан к вашему аккаунту. Вы можете управлять доступом и делиться дневником со специалистами.')
-        navigate(`/diaries/${id}`, { replace: true })
+    alert('Дневник успешно привязан к вашему аккаунту. Вы можете управлять доступом и делиться дневником со специалистами.')
+    navigate(`/diaries/${id}`, { replace: true })
       } catch (error) {
         console.error('Ошибка при принятии приглашения:', error)
         alert('Ошибка при принятии приглашения')
@@ -2993,7 +3234,7 @@ export const DiaryPage = () => {
 
         // Создаем уникальный ключ для каждой записи
         const uniqueKey = `${entry.id}_${entry.metric_type}_${entry.created_at}_${index}`
-        
+
         return {
           ...entry,
           label: getMetricLabel(entry.metric_type),
@@ -3101,7 +3342,7 @@ export const DiaryPage = () => {
       { id: 'history', label: 'История' },
     ]
 
-    if (isOrganization) {
+    if (isOrganization || (isOrgEmployee && employeePermissions.canManageClientAccess)) {
       base.push({ id: 'client', label: 'Клиент' })
     }
 
@@ -3110,7 +3351,7 @@ export const DiaryPage = () => {
     }
 
     return base
-  }, [isOrganization, isClient])
+  }, [isOrganization, isOrgEmployee, employeePermissions.canManageClientAccess, isClient])
   const tabIds = useMemo(() => tabs.map(tab => tab.id), [tabs])
   const handleTabChange = useCallback(
     (direction: 'next' | 'prev') => {
@@ -3266,16 +3507,16 @@ export const DiaryPage = () => {
       }
 
       // Обновляем локальное состояние
-      const entry: DiaryMetricValue = {
+    const entry: DiaryMetricValue = {
         id: data?.id || `value_${Date.now()}`,
-        diary_id: id,
-        metric_type: metricType,
+      diary_id: id,
+      metric_type: metricType,
         value: typeof value === 'object' ? (value as any).value : value,
         created_at: data?.recorded_at || new Date().toISOString(),
-      }
+    }
 
-      const mergedHistoryValues = mergeDiaryEntries([...metricValues, entry])
-      setMetricValues(mergedHistoryValues)
+    const mergedHistoryValues = mergeDiaryEntries([...metricValues, entry])
+    setMetricValues(mergedHistoryValues)
       
       // Перезагружаем значения из Supabase для синхронизации
       setTimeout(async () => {
@@ -3325,12 +3566,20 @@ export const DiaryPage = () => {
     }
 
     try {
+      // Определяем organization_id для приглашения
+      // Для организаций используем effectiveOrganizationId или organization_id из дневника
+      // Для руководителей используем employeeOrganizationId или finalEffectiveOrganizationId
+      const orgIdForInvite = isOrgEmployee 
+        ? (employeeOrganizationId || finalEffectiveOrganizationId || diary.organization_id)
+        : (diary.organization_id || effectiveOrganizationId)
+
       // Используем RPC для создания приглашения клиента
       const { data: inviteData, error: inviteError } = await supabase.rpc('generate_invite_link', {
         invite_type: 'organization_client',
         payload: {
           patient_card_id: diary.patient_card_id,
           diary_id: id,
+          organization_id: orgIdForInvite, // Передаем organization_id для привязки приглашения к организации
         },
       })
 
@@ -3368,19 +3617,24 @@ export const DiaryPage = () => {
       const link = `${appOrigin}/client-invite?diary=${id}&token=${inviteData.token}`
       
       // Обновляем состояние
+      // Используем organization_id из дневника или определяем его для руководителей
+      const orgIdForLink = isOrgEmployee 
+        ? (employeeOrganizationId || finalEffectiveOrganizationId || diary.organization_id)
+        : (diary.organization_id || effectiveOrganizationId)
+      
       const normalized: DiaryClientLink = {
-        link,
+      link,
         created_at: inviteData.created_at || new Date().toISOString(),
         token: inviteData.token,
-        diary_id: id,
+      diary_id: id,
         patient_card_id: diary.patient_card_id,
-        organization_id: diary?.organization_id ?? effectiveOrganizationId ?? null,
-        accepted_by: null,
-        accepted_at: null,
-      }
+        organization_id: orgIdForLink ?? null,
+      accepted_by: null,
+      accepted_at: null,
+    }
 
       setOrganizationClientLink(normalized)
-      setAttachedClient(null)
+    setAttachedClient(null)
 
       // Перезагружаем ссылки из БД
       const { data: clientLink } = await supabase
@@ -3432,8 +3686,8 @@ export const DiaryPage = () => {
     if (!id || !user) return
 
     try {
-      const token = crypto.randomUUID()
-      const link = `${appOrigin}/diaries/${id}?access=${token}`
+    const token = crypto.randomUUID()
+    const link = `${appOrigin}/diaries/${id}?access=${token}`
 
       // Создаем запись в diary_external_access_links
       const { data: newLink, error: createError } = await supabase
@@ -3506,34 +3760,52 @@ export const DiaryPage = () => {
     let newValue: DiaryMetricValue | null = null
 
     if (shouldPersistValue) {
-      // Сохраняем значение через RPC save_metric_value
-      try {
-        const { data: savedData, error: saveError } = await supabase.rpc('save_metric_value', {
-          p_diary_id: id,
-          p_metric_key: metricType,
-          p_value: typeof data.value === 'object' ? data.value : { value: data.value },
-          p_recorded_at: new Date().toISOString(),
-          p_metadata: {},
+      // Защита от дублирования: проверяем, не было ли уже сохранено такое же значение недавно (в течение последних 2 секунд)
+      const now = new Date()
+      const twoSecondsAgo = new Date(now.getTime() - 2000)
+      const recentDuplicate = metricValues.find(v => 
+        v.metric_type === metricType &&
+        String(v.value) === String(data.value) &&
+        new Date(v.created_at) > twoSecondsAgo
+      )
+      
+      if (recentDuplicate) {
+        console.log('[DiaryPage] Пропускаем сохранение: обнаружено дублирование значения', {
+          metricType,
+          value: data.value,
+          recentValue: recentDuplicate
         })
+        // Не сохраняем значение, но продолжаем обновлять настройки времени
+      } else {
+        // Сохраняем значение через RPC save_metric_value
+        try {
+          const { data: savedData, error: saveError } = await supabase.rpc('save_metric_value', {
+            p_diary_id: id,
+            p_metric_key: metricType,
+            p_value: typeof data.value === 'object' ? data.value : { value: data.value },
+            p_recorded_at: new Date().toISOString(),
+            p_metadata: {},
+          })
 
-        if (saveError) {
-          console.error('Ошибка сохранения значения метрики:', saveError)
+          if (saveError) {
+            console.error('Ошибка сохранения значения метрики:', saveError)
+            alert('Не удалось сохранить значение метрики. Попробуйте позже.')
+            return
+          }
+
+          // Создаем объект для локального состояния
+      newValue = {
+            id: savedData?.id || `value_${Date.now()}`,
+        diary_id: id,
+        metric_type: metricType,
+            value: typeof data.value === 'object' ? (data.value as any).value : data.value,
+            created_at: savedData?.recorded_at || new Date().toISOString(),
+          }
+        } catch (error) {
+          console.error('Ошибка сохранения значения метрики:', error)
           alert('Не удалось сохранить значение метрики. Попробуйте позже.')
           return
         }
-
-        // Создаем объект для локального состояния
-        newValue = {
-          id: savedData?.id || `value_${Date.now()}`,
-          diary_id: id,
-          metric_type: metricType,
-          value: typeof data.value === 'object' ? (data.value as any).value : data.value,
-          created_at: savedData?.recorded_at || new Date().toISOString(),
-        }
-      } catch (error) {
-        console.error('Ошибка сохранения значения метрики:', error)
-        alert('Не удалось сохранить значение метрики. Попробуйте позже.')
-        return
       }
     }
 
@@ -3562,8 +3834,8 @@ export const DiaryPage = () => {
         const currentMetadata = (existingMetric.metadata as any) || {}
         const updatedMetadata = {
           ...currentMetadata,
-          settings: normalizeSettings(settings),
-        }
+            settings: normalizeSettings(settings),
+          }
 
         const { error: updateError } = await supabase
           .from('diary_metrics')
@@ -3638,7 +3910,8 @@ export const DiaryPage = () => {
       [metricType]: normalizeSettings(settings),
     }))
     setCurrentTime(new Date())
-    if (panelMetric === metricType) {
+    // Закрываем панель только если было сохранено значение, а не только настройки времени
+    if (panelMetric === metricType && shouldPersistValue) {
       closePanel()
     }
   }
@@ -3880,10 +4153,10 @@ export const DiaryPage = () => {
       // Обновляем локальное состояние
       const updatedMetricSettings = { ...metricSettings }
       removedTypes.forEach(type => {
-        if (updatedMetricSettings[type]) {
-          delete updatedMetricSettings[type]
-        }
-      })
+          if (updatedMetricSettings[type]) {
+            delete updatedMetricSettings[type]
+          }
+        })
 
       // Перезагружаем метрики из Supabase
       const { data: reloadedMetrics, error: reloadError } = await supabase
@@ -4025,6 +4298,9 @@ export const DiaryPage = () => {
                     className={`grid grid-cols-3 gap-3 transition-opacity duration-300 ${
                       panelVisible ? 'opacity-0 pointer-events-none' : 'opacity-100'
                     }`}
+                    style={{
+                      gap: isSmallScreen ? '8px' : '12px'
+                    }}
                   >
                     {pinnedMetrics.map((metric, index) => {
                       const lastValue = getLastMetricValue(metric.metric_type)
@@ -4059,10 +4335,15 @@ export const DiaryPage = () => {
                         <button
                           key={metric.id}
                           onClick={() => handlePinnedCardClick(metric, index)}
-                          className={`bg-gradient-to-br from-[#61B4C6] to-[#317799] rounded-2xl p-3 text-white text-center shadow-md flex flex-col items-center w-full ${
+                          className={`bg-gradient-to-br from-[#61B4C6] to-[#317799] rounded-2xl text-white text-center shadow-md flex flex-col items-center w-full min-w-0 ${
                             !canFillMetrics ? 'opacity-60 cursor-not-allowed' : ''
                           }`}
-                          style={{ fontFamily: 'Manrope, sans-serif', ...cardStyle }}
+                          style={{ 
+                            fontFamily: 'Manrope, sans-serif', 
+                            padding: isSmallScreen ? '8px' : '12px',
+                            borderRadius: isSmallScreen ? '12px' : '16px',
+                            ...cardStyle 
+                          }}
                           disabled={
                             !canFillMetrics ||
                             (!!animatingPinnedMetric && animatingPinnedMetric.type !== metric.metric_type)
@@ -4073,19 +4354,25 @@ export const DiaryPage = () => {
                             style={{
                               fontFamily: 'Manrope, sans-serif',
                               fontWeight: 700,
-                              minHeight: '38px',
+                              minHeight: isSmallScreen ? '32px' : '38px',
                               lineHeight: '1.1',
                               display: 'flex',
                               alignItems: 'center',
                               justifyContent: 'center',
+                              fontSize: isSmallScreen ? '12px' : '16px',
                             }}
                           >
                             {getMetricLabel(metric.metric_type)}
                           </div>
 
-                          <div className="flex items-center justify-center w-full" style={{ height: '90px' }}>
-                            <div className="relative flex items-center justify-center" style={{ width: '90px', height: '90px' }}>
-                              <svg className="absolute inset-0" width="90" height="90" viewBox="0 0 90 90">
+                          <div className="flex items-center justify-center w-full" style={{ height: isSmallScreen ? '70px' : '90px' }}>
+                            <div className="relative flex items-center justify-center" style={{ 
+                              width: isSmallScreen ? '70px' : '90px', 
+                              height: isSmallScreen ? '70px' : '90px', 
+                              minWidth: isSmallScreen ? '70px' : '90px', 
+                              minHeight: isSmallScreen ? '70px' : '90px' 
+                            }}>
+                              <svg className="absolute inset-0 w-full h-full" viewBox="0 0 90 90" preserveAspectRatio="xMidYMid meet">
                                 <circle
                                   cx="45"
                                   cy="45"
@@ -4099,7 +4386,11 @@ export const DiaryPage = () => {
                               </svg>
                               <div
                                 className="text-2xl font-bold relative z-10 text-center"
-                                style={{ fontFamily: 'Manrope, sans-serif', fontWeight: 700 }}
+                                style={{ 
+                                  fontFamily: 'Manrope, sans-serif', 
+                                  fontWeight: 700,
+                                  fontSize: isSmallScreen ? '18px' : '24px',
+                                }}
                               >
                                 {displayValue}
                               </div>
@@ -4109,7 +4400,11 @@ export const DiaryPage = () => {
                           <div className="w-full space-y-1.5 mt-2">
                             <div
                               className="text-xs opacity-90 text-center"
-                              style={{ fontFamily: 'Manrope, sans-serif', fontWeight: 400 }}
+                              style={{ 
+                                fontFamily: 'Manrope, sans-serif', 
+                                fontWeight: 400,
+                                fontSize: isSmallScreen ? '10px' : '12px',
+                              }}
                             >
                               {metricSettings[metric.metric_type]?.times?.length
                                 ? `Заполнить через: ${getTimeUntilNext(metric.metric_type)}`
@@ -4123,6 +4418,9 @@ export const DiaryPage = () => {
                                 fontWeight: 400,
                                 backgroundColor: '#4A4A4A',
                                 borderRadius: '12px',
+                                fontSize: isSmallScreen ? '10px' : '12px',
+                                paddingTop: isSmallScreen ? '4px' : '6px',
+                                paddingBottom: isSmallScreen ? '4px' : '6px',
                               }}
                             >
                               Заполнить
@@ -4343,8 +4641,8 @@ export const DiaryPage = () => {
 
             {/* Кнопки внизу страницы */}
             <div className="mt-6 space-y-3">
-              {/* Изменить показатели (только для владельцев и организаций) */}
-              {canFillMetrics && !(isOrgEmployee || isCaregiver) && (
+              {/* Изменить показатели (для владельцев, организаций и администраторов/руководителей) */}
+              {canManageMetricsSettings && (
                 <button
                   onClick={() => navigate(`/diaries/${id}/edit-metrics`)}
                   className="w-full bg-white rounded-3xl shadow-sm px-5 py-3 text-center"
@@ -4355,8 +4653,8 @@ export const DiaryPage = () => {
                 </button>
               )}
 
-              {/* Управление доступом */}
-              {!isOrgEmployee && !isCaregiver && (
+              {/* Управление доступом (для владельцев, организаций, руководителей и администраторов) */}
+              {canManageAccessSettings && (
               <div className="bg-white rounded-3xl shadow-sm overflow-hidden">
                 <button
                   onClick={() => toggleSection('accessManagement')}
@@ -4376,87 +4674,91 @@ export const DiaryPage = () => {
                 {expandedSections.accessManagement && (
                   <div className="px-4 py-3 border-t border-gray-100 space-y-4">
                     {/* Секция для патронажных агентств - показываем если это патронажное агентство */}
-                    {assignmentOrganizationType === 'patronage_agency' && isOrganizationAccount && (
+                    {/* Доступ для организаций и руководителей/администраторов с правом управления доступом */}
+                    {/* Для руководителей проверяем роль напрямую, не дожидаясь загрузки employeePermissions */}
+                    {assignmentOrganizationType === 'patronage_agency' && (isOrganizationAccount || isOrgEmployee) && (
                       <div className="space-y-3">
-                        <div>
-                          <p className="text-sm font-semibold text-gray-700 mb-2">
-                            Добавить специалиста
-                          </p>
-                          {availableOrgEmployees.filter(
-                            employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
-                          ).length === 0 ? (
-                            <p className="text-xs text-gray-500">
-                              Все специалисты уже имеют доступ или отсутствуют в списке.
-                            </p>
-                          ) : (
-                            <div className="flex gap-2">
-                              <select
-                                value={selectedEmployeeId}
-                                onChange={event => setSelectedEmployeeId(event.target.value)}
-                                className="flex-1 rounded-2xl border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:border-[#7DD3DC] bg-white"
-                              >
-                                <option value="">Выберите специалиста</option>
-                                {availableOrgEmployees
-                                  .filter(
-                                    employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
-                                  )
-                                  .map(employee => (
-                                    <option key={employee.user_id} value={employee.user_id}>
-                                      {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
-                                        employee.user_id}{' '}
-                                      {employee.role ? `(${employee.role})` : ''}
-                                    </option>
-                                  ))}
-                              </select>
-                              <button
-                                onClick={() => handleAddEmployeeAccess()}
-                                disabled={!selectedEmployeeId}
-                                className="px-4 py-2 rounded-2xl bg-gradient-to-r from-[#7DD3DC] to-[#5CBCC7] text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
-                              >
-                                Добавить
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        <div>
-                          <p className="text-sm font-semibold text-gray-700 mb-2">
-                            Специалисты с доступом:
-                          </p>
-                          {assignedEmployeesDisplay.length === 0 ? (
-                            <p className="text-sm text-gray-500">Нет назначенных специалистов</p>
-                          ) : (
-                            <div className="space-y-2">
-                              {assignedEmployeesDisplay.map(employee => (
-                                <div
-                                  key={employee.user_id}
-                                  className="flex items-center justify-between py-2 border-b border-gray-100"
-                                >
-                                  <div>
-                                    <p className="text-sm text-gray-800">
-                                      {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
-                                        employee.user_id}
-                                    </p>
-                                    {employee.role && (
-                                      <p className="text-xs text-gray-500">{employee.role}</p>
-                                    )}
-                                  </div>
-                                  <button
-                                    onClick={() => handleRemoveEmployeeAccess(employee.user_id)}
-                                    className="text-red-600 hover:text-red-700 text-lg"
-                                    aria-label="Удалить доступ специалиста"
+                            <div>
+                              <p className="text-sm font-semibold text-gray-700 mb-2">
+                                Добавить специалиста
+                              </p>
+                              {availableOrgEmployees.filter(
+                                employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
+                              ).length === 0 ? (
+                                <p className="text-xs text-gray-500">
+                                  Все специалисты уже имеют доступ или отсутствуют в списке.
+                                </p>
+                              ) : (
+                                <div className="flex gap-2">
+                                  <select
+                                    value={selectedEmployeeId}
+                                    onChange={event => setSelectedEmployeeId(event.target.value)}
+                                    className="flex-1 rounded-2xl border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:border-[#7DD3DC] bg-white"
                                   >
-                                    🗑️
+                                    <option value="">Выберите специалиста</option>
+                                    {availableOrgEmployees
+                                      .filter(
+                                        employee => !assignedEmployees.some(item => item.user_id === employee.user_id)
+                                      )
+                                      .map(employee => (
+                                        <option key={employee.user_id} value={employee.user_id}>
+                                          {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
+                                            employee.user_id}{' '}
+                                          {employee.role ? `(${employee.role})` : ''}
+                                        </option>
+                                      ))}
+                                  </select>
+                                  <button
+                                onClick={() => handleAddEmployeeAccess()}
+                                    disabled={!selectedEmployeeId}
+                                    className="px-4 py-2 rounded-2xl bg-gradient-to-r from-[#7DD3DC] to-[#5CBCC7] text-white text-sm font-semibold disabled:opacity-60 disabled:cursor-not-allowed transition-opacity"
+                                  >
+                                    Добавить
                                   </button>
                                 </div>
-                              ))}
+                              )}
                             </div>
-                          )}
-                        </div>
+                            <div>
+                              <p className="text-sm font-semibold text-gray-700 mb-2">
+                                Специалисты с доступом:
+                              </p>
+                              {assignedEmployeesDisplay.length === 0 ? (
+                                <p className="text-sm text-gray-500">Нет назначенных специалистов</p>
+                              ) : (
+                                <div className="space-y-2">
+                                  {assignedEmployeesDisplay.map(employee => (
+                                    <div
+                                      key={employee.user_id}
+                                      className="flex items-center justify-between py-2 border-b border-gray-100"
+                                    >
+                                      <div>
+                                        <p className="text-sm text-gray-800">
+                                          {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
+                                            employee.user_id}
+                                        </p>
+                                        {employee.role && (
+                                          <p className="text-xs text-gray-500">{employee.role}</p>
+                                        )}
+                                      </div>
+                                      <button
+                                        onClick={() => handleRemoveEmployeeAccess(employee.user_id)}
+                                        className="text-red-600 hover:text-red-700 text-lg"
+                                        aria-label="Удалить доступ специалиста"
+                                      >
+                                        🗑️
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
                       </div>
                     )}
 
                     {/* Секция для пансионатов */}
-                    {assignmentOrganizationType === 'pension' && isOrganizationAccount && availableOrgEmployees.length > 0 && (
+                    {/* Доступ для организаций и руководителей/администраторов с правом управления доступом */}
+                    {/* Для руководителей проверяем роль напрямую, не дожидаясь загрузки employeePermissions */}
+                    {assignmentOrganizationType === 'pension' && (isOrganizationAccount || isOrgEmployee) && availableOrgEmployees.length > 0 && (
                       <div className="space-y-3">
                         <div>
                           <p className="text-sm font-semibold text-gray-700 mb-2">
@@ -4498,11 +4800,11 @@ export const DiaryPage = () => {
                             </div>
                           )}
                         </div>
-                        <div>
-                          <p className="text-sm font-semibold text-gray-700 mb-2">
-                            Сотрудники организации
-                          </p>
-                          <div className="space-y-2">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-700 mb-2">
+                              Сотрудники организации
+                            </p>
+                            <div className="space-y-2">
                             {availableOrgEmployees.map(employee => {
                               // Для пансионатов: все сотрудники имеют доступ по умолчанию
                               // "Нет доступа" только если есть запись с revoked_at
@@ -4557,11 +4859,11 @@ export const DiaryPage = () => {
                                 </div>
                               )
                             })}
-                          </div>
+                            </div>
                           <p className="text-xs text-gray-500 mt-2">
                             Вы можете добавлять и убирать доступ у сотрудников пансионата.
-                          </p>
-                        </div>
+                            </p>
+                          </div>
                       </div>
                     )}
 
@@ -4586,36 +4888,14 @@ export const DiaryPage = () => {
                           </p>
                         </div>
                       )}
+                      {/* ВАЖНО: Для патронажных агентств сотрудники уже отображаются в разделе "Специалисты с доступом:" выше,
+                          поэтому здесь их не показываем, чтобы избежать дублирования */}
                       {assignmentOrganizationType === 'patronage_agency' &&
                         organizationAccountAccess &&
-                        assignedEmployeesDisplay.length > 0 && (
-                        <div className="space-y-2">
-                          {assignedEmployeesDisplay.map(employee => (
-                            <div
-                              key={`client-view-${employee.user_id}`}
-                              className="flex items-center justify-between py-2 border-b border-gray-100"
-                            >
-                              <div>
-                                <p className="text-sm text-gray-800">
-                                  {`${employee.first_name || ''} ${employee.last_name || ''}`.trim() ||
-                                    employee.user_id}
-                                </p>
-                                {employee.role && (
-                                  <p className="text-xs text-gray-500">{employee.role}</p>
-                                )}
-                              </div>
-                              {canManageAccessSettings && (
-                                <button
-                                  onClick={() => handleRemoveEmployeeAccess(employee.user_id)}
-                                  className="text-red-600 hover:text-red-700 text-lg"
-                                  aria-label="Удалить доступ специалиста"
-                                >
-                                  🗑️
-                                </button>
-                              )}
-                            </div>
-                          ))}
-                        </div>
+                        assignedEmployeesDisplay.length === 0 && (
+                        <p className="text-xs text-gray-500">
+                          Нет назначенных специалистов
+                        </p>
                       )}
                       {assignmentOrganizationType === 'pension' &&
                         organizationAccountAccess &&
@@ -4642,8 +4922,8 @@ export const DiaryPage = () => {
                         </div>
                       )}
                       {diary?.organization_id && canManageAccessSettings && (
-                        <div className="flex items-center justify-between py-2 border-b border-gray-100">
-                          <div>
+                          <div className="flex items-center justify-between py-2 border-b border-gray-100">
+                            <div>
                             <p className="text-sm text-gray-800">
                               {organizationInfo?.name || 'Организация'}
                             </p>
@@ -4655,17 +4935,17 @@ export const DiaryPage = () => {
                                 : 'Организация'}
                               {organizationInfo?.id && ` (ID: ${organizationInfo.id})`}
                             </p>
-                          </div>
-                          <button
-                            onClick={() => handleRemoveAccess('organization')}
-                            className="text-red-600 hover:text-red-700 text-lg"
-                            aria-label="Удалить доступ организации"
+                            </div>
+                            <button
+                              onClick={() => handleRemoveAccess('organization')}
+                              className="text-red-600 hover:text-red-700 text-lg"
+                              aria-label="Удалить доступ организации"
                             title="Отвязать дневник от организации"
-                          >
-                            🗑️
-                          </button>
-                        </div>
-                      )}
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        )}
                       {!diary?.organization_id &&
                         !diary?.caregiver_id &&
                         (organizationType !== 'patronage_agency' || assignedEmployeesDisplay.length === 0) && (
@@ -4843,7 +5123,7 @@ export const DiaryPage = () => {
           </div>
         )}
 
-        {activeTab === 'client' && isOrganization && (
+        {activeTab === 'client' && (isOrganization || (isOrgEmployee && employeePermissions.canManageClientAccess)) && (
           <div className="space-y-5">
             {!organizationClientLink?.accepted_by && (
             <div className="bg-white rounded-3xl shadow-sm p-6 space-y-3">

@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
 import { Button, Input, Modal } from '@/components/ui'
 import { supabase } from '@/lib/supabase'
+import { canEditDiaryMetrics } from '@/utils/employeePermissions'
 
 // interface DiaryMetric {
 //   id: string
@@ -82,26 +83,28 @@ export const EditDiaryMetricsPage = () => {
     }
 
     // Проверка прав доступа
-    const currentUser = JSON.parse(localStorage.getItem('current_user') || '{}')
-    const userRole = currentUser.user_role || user.user_metadata?.user_role
-    const organizationType = currentUser.organization_type || user.user_metadata?.organization_type
+    const checkPermissions = async () => {
+      if (!user) {
+        navigate('/login')
+        return
+      }
 
-    // Клиенты и организации могут редактировать показатели
-    // Частные сиделки НЕ могут редактировать показатели
-    if (organizationType === 'caregiver') {
-      alert('У вас нет прав на редактирование показателей дневника')
-      navigate(`/diaries/${id}`)
-      return
+      try {
+        const hasPermission = await canEditDiaryMetrics(user)
+        if (!hasPermission) {
+          alert('У вас нет прав на редактирование показателей дневника')
+          navigate(`/diaries/${id}`)
+          return
+        }
+      } catch (error) {
+        console.error('Ошибка проверки прав доступа:', error)
+        alert('Ошибка проверки прав доступа')
+        navigate(`/diaries/${id}`)
+        return
+      }
     }
 
-    // Сотрудники организаций НЕ могут редактировать показатели
-    if (userRole === 'org_employee') {
-      alert('У вас нет прав на редактирование показателей дневника')
-      navigate(`/diaries/${id}`)
-      return
-    }
-
-    // Клиенты и организации (pension, patronage_agency) могут редактировать показатели
+    checkPermissions()
 
     // Загружаем текущие показатели дневника из Supabase
     const loadMetrics = async () => {
@@ -226,6 +229,16 @@ export const EditDiaryMetricsPage = () => {
   const handleSave = async () => {
     if (!id) return
 
+    // Автоматически сохраняем пользовательский показатель, если он введен
+    if (newCustomMetric.trim()) {
+      handleAddCustomMetric()
+      // Небольшая задержка, чтобы состояние обновилось
+      await new Promise(resolve => setTimeout(resolve, 150))
+    }
+    
+    // Используем актуальные значения из state (после задержки они должны обновиться)
+    // Но так как React state обновляется асинхронно, используем значения напрямую из state
+    // которые будут актуальными после handleAddCustomMetric
     if (selectedPinned.length === 0 && selectedAll.length === 0) {
       alert('Необходимо выбрать хотя бы один показатель')
       return
@@ -250,6 +263,7 @@ export const EditDiaryMetricsPage = () => {
       )
 
       // Объединяем все выбранные метрики (закрепленные + остальные)
+      // Используем актуальные значения из state
       const allSelectedMetrics = Array.from(new Set([...selectedPinned, ...selectedAll]))
 
       // Подготавливаем метрики для upsert (обновление или вставка)
@@ -580,7 +594,16 @@ const excretionMetricsOptions = [
             </div>
           </div>
 
-          <Button onClick={() => setShowPinnedModal(false)} className="w-full">
+          <Button 
+            onClick={() => {
+              // Автоматически сохраняем пользовательский показатель, если он введен
+              if (newCustomMetric.trim()) {
+                handleAddCustomMetric()
+              }
+              setShowPinnedModal(false)
+            }} 
+            className="w-full"
+          >
             Сохранить
           </Button>
         </div>
@@ -651,13 +674,26 @@ const excretionMetricsOptions = [
                 placeholder="Название показателя"
                 className="flex-1"
               />
-              <Button onClick={handleAddCustomMetric} disabled={!newCustomMetric.trim()}>
-                Добавить
+              <Button 
+                onClick={handleAddCustomMetric} 
+                disabled={!newCustomMetric.trim()}
+                className="!px-8 !py-3 !text-xl !font-bold !min-w-[80px]"
+              >
+                +
               </Button>
             </div>
           </div>
 
-          <Button onClick={() => setShowAllModal(false)} className="w-full">
+          <Button 
+            onClick={() => {
+              // Автоматически сохраняем пользовательский показатель, если он введен
+              if (newCustomMetric.trim()) {
+                handleAddCustomMetric()
+              }
+              setShowAllModal(false)
+            }} 
+            className="w-full"
+          >
             Сохранить
           </Button>
         </div>

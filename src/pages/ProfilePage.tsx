@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
@@ -15,6 +15,7 @@ interface ProfileData {
   address?: string
   firstName?: string
   lastName?: string
+  avatar_url?: string
 }
 
 export const ProfilePage = () => {
@@ -24,6 +25,8 @@ export const ProfilePage = () => {
   const [organizationType, setOrganizationType] = useState<OrganizationType | 'employee' | 'client' | null>(null)
   const [profileData, setProfileData] = useState<ProfileData | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // Загрузка данных профиля
   useEffect(() => {
@@ -59,6 +62,7 @@ export const ProfilePage = () => {
                 address: data.address || null,
                 firstName: data.first_name || null,
                 lastName: data.last_name || null,
+                avatar_url: data.avatar_url || null,
               })
               setIsLoading(false)
               return
@@ -125,7 +129,7 @@ export const ProfilePage = () => {
           try {
             const { data: clientData, error: clientError } = await supabase
               .from('clients')
-              .select('first_name, last_name, phone')
+              .select('first_name, last_name, phone, avatar_url')
               .eq('user_id', user.id)
               .single()
             
@@ -137,6 +141,7 @@ export const ProfilePage = () => {
                 firstName: clientData.first_name,
                 lastName: clientData.last_name,
                 phone: phone,
+                avatar_url: clientData.avatar_url || null,
               })
               setIsLoading(false)
               console.log('✅ ProfilePage: Client profile loaded from Supabase')
@@ -274,6 +279,19 @@ export const ProfilePage = () => {
             if (!dbError && data) {
               const phone = (user as any).phone || user.user_metadata?.phone_for_login || user.user_metadata?.phone || data.phone || null
               
+              // Загружаем avatar_url из user_profiles для сотрудника
+              let avatarUrl = null
+              try {
+                const { data: userProfile } = await supabase
+                  .from('user_profiles')
+                  .select('avatar_url')
+                  .eq('user_id', user.id)
+                  .maybeSingle()
+                avatarUrl = userProfile?.avatar_url || null
+              } catch (err) {
+                console.log('Error loading avatar from user_profiles:', err)
+              }
+              
               console.log('ProfilePage: Employee data from DB:', {
                 first_name: data.first_name,
                 last_name: data.last_name,
@@ -295,6 +313,7 @@ export const ProfilePage = () => {
                 firstName: data.first_name,
                 lastName: data.last_name,
                 phone: phone,
+                avatar_url: avatarUrl,
               })
               setOrganizationType('employee')
               setIsLoading(false)
@@ -397,10 +416,124 @@ export const ProfilePage = () => {
   //   }
   // }
   
-  // Получаем имя (первое слово для отображения в карточке)
+  // Получаем имя для отображения в карточке
+  // Для сотрудников и клиентов - только имя, для организаций - полное название
   const displayName = (isEmployee || isClient) && profileData.firstName 
     ? profileData.firstName 
-    : profileData.name.split(' ')[0] || profileData.name
+    : profileData.name
+
+  // Обработка загрузки аватара
+  const handleAvatarClick = () => {
+    fileInputRef.current?.click()
+  }
+
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !user) return
+
+    // Проверка типа файла
+    if (!file.type.startsWith('image/')) {
+      alert('Пожалуйста, выберите изображение')
+      return
+    }
+
+    // Проверка размера (макс 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Размер файла не должен превышать 5MB')
+      return
+    }
+
+    setIsUploadingAvatar(true)
+
+    try {
+      // Генерируем уникальное имя файла
+      const fileExt = file.name.split('.').pop()
+      const fileName = `${user.id}-${Date.now()}.${fileExt}`
+      const filePath = fileName // Убираем префикс avatars/, так как bucket уже называется avatars
+
+      console.log('ProfilePage: Uploading avatar to bucket "avatars", filePath:', filePath)
+
+      // Загружаем файл в Supabase Storage напрямую
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('avatars')
+        .upload(filePath, file, {
+          cacheControl: '3600',
+          upsert: true
+        })
+
+      if (uploadError) {
+        console.error('ProfilePage: Upload error:', uploadError)
+        console.error('ProfilePage: Upload error details:', {
+          message: uploadError.message,
+          statusCode: (uploadError as any).statusCode,
+          error: (uploadError as any).error,
+        })
+        
+        // Проверяем тип ошибки и показываем понятное сообщение
+        let errorMessage = 'Не удалось загрузить аватар. '
+        
+        if (uploadError.message?.includes('Bucket not found') || uploadError.message?.includes('not found')) {
+          errorMessage += 'Bucket "avatars" не найден. Убедитесь, что bucket создан в Supabase Storage.'
+        } else if (uploadError.message?.includes('row-level security') || uploadError.message?.includes('RLS')) {
+          errorMessage += 'Нет прав на загрузку файла. Обратитесь к администратору для настройки политик Storage.'
+        } else if (uploadError.message?.includes('JWT')) {
+          errorMessage += 'Ошибка аутентификации. Попробуйте выйти и войти снова.'
+        } else if (uploadError.message?.includes('size') || uploadError.message?.includes('limit')) {
+          errorMessage += 'Файл слишком большой. Максимальный размер: 5MB.'
+        } else {
+          errorMessage += uploadError.message || 'Попробуйте еще раз.'
+        }
+        
+        throw new Error(errorMessage)
+      }
+
+      console.log('ProfilePage: File uploaded successfully:', uploadData)
+
+      // Получаем публичный URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('avatars')
+        .getPublicUrl(filePath)
+      
+      console.log('ProfilePage: Public URL generated:', publicUrl)
+
+      // Обновляем avatar_url в БД
+      if (isOrganization) {
+        const { error: updateError } = await supabase
+          .from('organizations')
+          .update({ avatar_url: publicUrl })
+          .eq('user_id', user.id)
+
+        if (updateError) throw updateError
+      } else if (isEmployee) {
+        // Для сотрудников можно сохранить в user_profiles или organizations через organization_id
+        const { error: updateError } = await supabase
+          .from('user_profiles')
+          .update({ avatar_url: publicUrl })
+          .eq('user_id', user.id)
+
+        if (updateError) throw updateError
+      } else if (isClient) {
+        const { error: updateError } = await supabase
+          .from('clients')
+          .update({ avatar_url: publicUrl })
+          .eq('user_id', user.id)
+
+        if (updateError) throw updateError
+      }
+
+      // Обновляем локальное состояние
+      setProfileData(prev => prev ? { ...prev, avatar_url: publicUrl } : null)
+    } catch (error: any) {
+      console.error('Ошибка загрузки аватара:', error)
+      alert('Не удалось загрузить аватар. Попробуйте еще раз.')
+    } finally {
+      setIsUploadingAvatar(false)
+      // Сбрасываем input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+  }
 
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col">
@@ -429,11 +562,44 @@ export const ProfilePage = () => {
         <div className="bg-white rounded-3xl shadow-md p-4 mb-6 mt-4">
           <div className="flex items-center gap-3">
             {/* Аватар */}
-            <div className="w-16 h-16 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden">
-              <img 
-                src="/icons/Иконка профиль.png" 
-                alt="Профиль" 
-                className="w-full h-full object-contain"
+            <div className="flex flex-col items-center flex-shrink-0">
+              <div 
+                onClick={handleAvatarClick}
+                className="w-16 h-16 rounded-full flex items-center justify-center overflow-hidden cursor-pointer relative group bg-gray-100"
+              >
+                {profileData.avatar_url ? (
+                  <img 
+                    src={profileData.avatar_url} 
+                    alt="Аватар" 
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <img 
+                    src="/icons/Иконка профиль.png" 
+                    alt="Профиль" 
+                    className="w-full h-full object-contain"
+                  />
+                )}
+                {isUploadingAvatar && (
+                  <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                    <div className="animate-spin w-6 h-6 border-2 border-white border-t-transparent rounded-full"></div>
+                  </div>
+                )}
+                {!isUploadingAvatar && (
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 flex items-center justify-center transition-colors">
+                    <svg className="w-6 h-6 text-white opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </div>
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleAvatarChange}
+                className="hidden"
               />
             </div>
 
@@ -593,7 +759,7 @@ export const ProfilePage = () => {
             <button
               onClick={() => {
                 // Открываем WhatsApp чат с поддержкой
-                const phoneNumber = '79244415365' // Номер без знака +
+                const phoneNumber = '79145391376' // Номер без знака +
                 const whatsappUrl = `https://wa.me/${phoneNumber}`
                 window.open(whatsappUrl, '_blank')
               }}

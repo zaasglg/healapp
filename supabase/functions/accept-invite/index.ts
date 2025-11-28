@@ -83,7 +83,9 @@ function normalizePhone(phone: string): string {
 
 function buildPseudoEmail(phone: string, role: InviteType): string {
   const sanitized = phone.replace(/[^0-9]/g, "");
-  return `${role}-${sanitized}@diary.local`; // псевдо-email для Supabase Auth
+  // Добавляем короткий случайный хвост, чтобы избежать коллизий email при повторной регистрации тем же телефоном
+  const suffix = crypto.randomUUID().slice(0, 8);
+  return `${role}-${sanitized}-${suffix}@diary.local`;
 }
 
 async function fetchInvite(client: SupabaseClient, token: string): Promise<InviteRecord> {
@@ -172,9 +174,107 @@ async function handleOrganizationEmployee(
   }
 
   const normalizedPhone = normalizePhone(payload.phone);
+  
+  // Проверяем, не использовано ли уже это приглашение
+  if (invite.used_at) {
+    // Если приглашение использовано, проверяем, существует ли пользователь
+    const { data: existingEmployee } = await client
+      .from("organization_employees")
+      .select("user_id")
+      .eq("organization_id", meta.organization_id)
+      .limit(1)
+      .maybeSingle();
+    
+    // Проверяем, есть ли пользователь с таким телефоном
+    const { data: existingUserByPhone } = await client
+      .from("user_profiles")
+      .select("user_id, role, organization_id")
+      .eq("phone_e164", normalizedPhone)
+      .eq("role", "org_employee")
+      .maybeSingle();
+    
+    if (existingUserByPhone && existingUserByPhone.organization_id === meta.organization_id) {
+      // Пользователь уже существует, возвращаем информацию для входа
+      const { data: authUser } = await client.auth.admin.getUserById(existingUserByPhone.user_id);
+      if (authUser?.user) {
+        // Используем email для входа, так как вход по телефону может быть отключен
+        const userEmail = authUser.user.email;
+        if (!userEmail) {
+          throw new Response("Не удалось найти email пользователя для входа.", { status: 500 });
+        }
+        
+        // Пытаемся создать сессию с предоставленным паролем через email
+        try {
+          const session = await createSession(client, {
+            email: userEmail,
+            password: payload.password,
+          });
+          
+          if (session) {
+            // Возвращаем результат с сессией для фронтенда
+            return {
+              userId: authUser.user.id,
+              role: "org_employee",
+              organizationId: meta.organization_id,
+              loginPhone: normalizedPhone,
+              loginEmail: userEmail,
+              session: session, // Добавляем сессию для фронтенда
+            } as HandlerResult & { session: any };
+          }
+        } catch (sessionError) {
+          // Если не удалось войти, возможно пароль неверный
+          throw new Response("Пользователь с этим телефоном уже зарегистрирован. Используйте правильный пароль для входа.", { status: 409 });
+        }
+      }
+    }
+    
+    // Приглашение использовано, но пользователь не найден - это ошибка
+    throw new Response("Invite already used", { status: 410 });
+  }
+
   const pseudoEmail = normalizedPhone
     ? buildPseudoEmail(normalizedPhone, "organization_employee")
     : `${crypto.randomUUID()}@employee.diary.local`;
+
+  // Проверяем, не существует ли уже пользователь с таким телефоном
+  const { data: existingUserByPhone } = await client
+    .from("user_profiles")
+    .select("user_id, role, organization_id")
+    .eq("phone_e164", normalizedPhone)
+    .eq("role", "org_employee")
+    .maybeSingle();
+  
+  if (existingUserByPhone && existingUserByPhone.organization_id === meta.organization_id) {
+    // Пользователь уже существует в этой организации, пытаемся войти
+    try {
+      // Получаем email пользователя для входа
+      const { data: authUser } = await client.auth.admin.getUserById(existingUserByPhone.user_id);
+      const userEmail = authUser?.user?.email;
+      
+      if (!userEmail) {
+        throw new Response("Не удалось найти email пользователя для входа.", { status: 500 });
+      }
+      
+      // Используем email для входа, так как вход по телефону может быть отключен
+      const session = await createSession(client, {
+        email: userEmail,
+        password: payload.password,
+      });
+      
+      if (session) {
+        return {
+          userId: existingUserByPhone.user_id,
+          role: "org_employee",
+          organizationId: meta.organization_id,
+          loginPhone: normalizedPhone,
+          loginEmail: userEmail,
+          session: session, // Добавляем сессию для фронтенда
+        } as HandlerResult & { session: any };
+      }
+    } catch (sessionError) {
+      throw new Response("Пользователь с этим телефоном уже зарегистрирован. Используйте правильный пароль для входа.", { status: 409 });
+    }
+  }
 
   const user = await createAuthUser(client, {
     email: pseudoEmail,
@@ -663,6 +763,64 @@ async function handleCaregiverClient(
   };
 }
 
+async function handleAdminStaticClient(
+  client: SupabaseClient,
+  invite: InviteRecord,
+  payload: Required<Pick<AcceptInviteRequest, "password" | "phone">> & { email?: string; firstName?: string; lastName?: string }
+): Promise<HandlerResult> {
+  const normalizedPhone = normalizePhone(payload.phone);
+  const pseudoEmail = normalizedPhone
+    ? buildPseudoEmail(normalizedPhone, "admin_static")
+    : `${crypto.randomUUID()}@client.diary.local`;
+  const finalEmail = payload.email ?? pseudoEmail;
+
+  // Создаем auth-пользователя
+  const user = await createAuthUser(client, {
+    email: finalEmail,
+    password: payload.password,
+    phone: normalizedPhone,
+    userMetadata: {
+      invite_token: invite.token,
+      role: "client",
+      phone: normalizedPhone,
+    },
+  });
+
+  // Создаем клиента без привязок
+  const clientInsert = await client
+    .from("clients")
+    .insert({
+      user_id: user.id,
+      phone: normalizedPhone,
+      first_name: payload.firstName || "",
+      last_name: payload.lastName || "",
+    })
+    .select("id")
+    .single();
+  if (clientInsert.error) throw clientInsert.error;
+  const clientId = clientInsert.data.id;
+
+  // Профиль
+  const { error: profileError } = await client.from("user_profiles").insert({
+    user_id: user.id,
+    role: "client",
+    client_id: clientId,
+    phone_e164: normalizedPhone,
+    metadata: { source_invite: invite.token },
+  });
+  if (profileError) throw profileError;
+
+  await markInviteUsed(client, invite.id, user.id);
+
+  return {
+    userId: user.id,
+    role: "client",
+    clientId,
+    loginPhone: normalizedPhone,
+    loginEmail: finalEmail,
+  };
+}
+
 async function acceptInviteHandler(client: SupabaseClient, payload: AcceptInviteRequest): Promise<HandlerResult> {
   const { token, password, firstName, lastName } = payload;
   if (!token || !password) {
@@ -670,7 +828,20 @@ async function acceptInviteHandler(client: SupabaseClient, payload: AcceptInvite
   }
 
   const invite = await fetchInvite(client, token);
-  ensureInviteUsable(invite);
+  
+  // Для сотрудников проверка used_at выполняется внутри handleOrganizationEmployee
+  // чтобы позволить повторный вход, если пользователь уже зарегистрирован
+  if (invite.invite_type !== "organization_employee") {
+    ensureInviteUsable(invite);
+  } else {
+    // Для сотрудников проверяем только revoked и expired
+    if (invite.revoked_at) {
+      throw new Response("Invite revoked", { status: 410 });
+    }
+    if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
+      throw new Response("Invite expired", { status: 410 });
+    }
+  }
 
   switch (invite.invite_type) {
     case "organization_employee": {
@@ -707,6 +878,19 @@ async function acceptInviteHandler(client: SupabaseClient, payload: AcceptInvite
         throw new Response("phone is required for client invite", { status: 400 });
       }
       return await handleCaregiverClient(client, invite, {
+        password,
+        phone,
+        firstName: firstName || undefined,
+        lastName: lastName || undefined,
+        email: payload.email,
+      });
+    }
+    case "admin_static": {
+      const phone = payload.phone ?? invite.metadata?.["phone"]?.toString();
+      if (!phone) {
+        throw new Response("phone is required for client invite", { status: 400 });
+      }
+      return await handleAdminStaticClient(client, invite, {
         password,
         phone,
         firstName: firstName || undefined,
@@ -783,28 +967,20 @@ Deno.serve(async (req: Request) => {
 
     const result = await acceptInviteHandler(client, payload);
 
-    // Используем email для входа, так как phone logins могут быть отключены
-    const session = await createSession(client, {
-      email: result.loginEmail,
-      password: payload.password!,
-    });
-
-    // Убираем loginPhone и loginEmail из ответа (не нужны на фронтенде)
-    const { loginPhone, loginEmail, ...sanitized } = result;
-
+    // Проверяем, есть ли сессия в результате (для случая, когда пользователь уже существует)
+    const resultWithSession = result as HandlerResult & { session?: any };
+    
+    // Возвращаем данные, включая сессию, если она есть
     return corsResponse({
       success: true,
       data: {
-        ...sanitized,
-        session: session
-          ? {
-              access_token: session.access_token,
-              refresh_token: session.refresh_token,
-              token_type: session.token_type,
-              expires_in: session.expires_in,
-              expires_at: session.expires_at,
-            }
-          : null,
+        userId: result.userId,
+        role: result.role,
+        organizationId: result.organizationId ?? null,
+        clientId: result.clientId ?? null,
+        loginEmail: result.loginEmail,
+        loginPhone: result.loginPhone,
+        session: resultWithSession.session ?? null, // Добавляем сессию, если она есть
       },
     });
   } catch (error) {

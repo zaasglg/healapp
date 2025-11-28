@@ -1,5 +1,6 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState, useEffect } from 'react'
 import { Input, Button } from '@/components/ui'
+import { getFunctionUrl } from '@/utils/supabaseConfig'
 
 type UserFilter = 'all' | 'organization' | 'employee' | 'privateCaregiver' | 'client'
 
@@ -39,7 +40,7 @@ const TYPE_PRIORITY: Record<UserFilter, number> = {
 
 // const asArray = (value: any) => (Array.isArray(value) ? value : [])
 
-const readArray = (keys: string[]): any[] => {
+const _readArray = (keys: string[]): any[] => {
   for (const key of keys) {
     if (!key) continue
     try {
@@ -55,8 +56,9 @@ const readArray = (keys: string[]): any[] => {
   }
   return []
 }
+void _readArray // Prevent unused variable warning
 
-const readObject = (keys: string[]): Record<string, any> => {
+const _readObject = (keys: string[]): Record<string, any> => {
   for (const key of keys) {
     if (!key) continue
     try {
@@ -72,6 +74,7 @@ const readObject = (keys: string[]): Record<string, any> => {
   }
   return {}
 }
+void _readObject // Prevent unused variable warning
 
 const safeString = (value: any) => (value === undefined || value === null ? '' : String(value))
 
@@ -141,7 +144,7 @@ const inferTypeFromUser = (user: any): UserFilter | null => {
   return null
 }
 
-const loadOrganizations = () => {
+const _loadOrganizations = () => {
   try {
     const raw = localStorage.getItem('organizations') || localStorage.getItem('admin_organizations')
     const parsed = raw ? JSON.parse(raw) : []
@@ -152,27 +155,129 @@ const loadOrganizations = () => {
     return []
   }
 }
+void _loadOrganizations // Prevent unused variable warning
 
 export const AdminUsersPage = () => {
   const [filter, setFilter] = useState<UserFilter>('all')
   const [search, setSearch] = useState('')
   const [dataVersion, setDataVersion] = useState(0)
   const [selectedUser, setSelectedUser] = useState<AdminUserRow | null>(null)
-  const [isEditContact, setIsEditContact] = useState(false)
+  const [_isEditContact, setIsEditContact] = useState(false)
+  void _isEditContact // Prevent unused variable warning
   const [contactValue, setContactValue] = useState('')
-  const [resetMessage, setResetMessage] = useState<string | null>(null)
+  const [_resetMessage, setResetMessage] = useState<string | null>(null)
+  void _resetMessage // Prevent unused variable warning
+  const [isLoading, setIsLoading] = useState(true)
+  const [supabaseData, setSupabaseData] = useState<{
+    organizations: any[]
+    userProfiles: any[]
+    clients: any[]
+    diaries: any[]
+    patientCards: any[]
+    diaryEmployeeAccess: any[]
+  }>({
+    organizations: [],
+    userProfiles: [],
+    clients: [],
+    diaries: [],
+    patientCards: [],
+    diaryEmployeeAccess: [],
+  })
 
-  const diaries = useMemo(() => {
-    try {
-      const raw = localStorage.getItem('diaries')
-      return raw ? JSON.parse(raw) : []
-    } catch (error) {
-      console.warn('Не удалось загрузить diaries', error)
-      return []
+  // Загрузка данных из Supabase через Edge Function
+  useEffect(() => {
+    const loadSupabaseData = async () => {
+      setIsLoading(true)
+      try {
+        // Получаем админский токен из localStorage
+        const adminToken = localStorage.getItem('admin_panel_token')
+        if (!adminToken) {
+          console.error('Не найден админский токен')
+          setIsLoading(false)
+          return
+        }
+
+        const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+        
+        if (!supabaseAnonKey) {
+          console.error('Не настроен VITE_SUPABASE_ANON_KEY')
+          setIsLoading(false)
+          return
+        }
+
+        // Используем утилиту для получения правильного URL функций
+        const functionUrl = getFunctionUrl('admin-users-data')
+        const response = await fetch(`${functionUrl}?admin_token=${encodeURIComponent(adminToken)}`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${supabaseAnonKey}`,
+            'apikey': supabaseAnonKey,
+          },
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: 'Неизвестная ошибка' }))
+          console.error('Ошибка загрузки данных:', errorData)
+          setIsLoading(false)
+          return
+        }
+
+        const result = await response.json()
+
+        if (!result.success || !result.data) {
+          console.error('Неверный формат ответа от Edge Function')
+          setIsLoading(false)
+          return
+        }
+
+        console.log('✅ Загружены данные из Supabase:', {
+          organizations: result.data.organizations?.length || 0,
+          userProfiles: result.data.userProfiles?.length || 0,
+          clients: result.data.clients?.length || 0,
+          diaries: result.data.diaries?.length || 0,
+          patientCards: result.data.patientCards?.length || 0,
+          diaryEmployeeAccess: result.data.diaryEmployeeAccess?.length || 0,
+        })
+        
+        // Детальное логирование для отладки
+        if (result.data.organizations?.length > 0) {
+          console.log('📋 Организации из БД:', result.data.organizations)
+        }
+        if (result.data.userProfiles?.length > 0) {
+          console.log('👤 Профили пользователей из БД:', result.data.userProfiles)
+        }
+        if (result.data.clients?.length > 0) {
+          console.log('🏥 Клиенты из БД:', result.data.clients)
+        }
+
+        setSupabaseData({
+          organizations: result.data.organizations || [],
+          userProfiles: result.data.userProfiles || [],
+          clients: result.data.clients || [],
+          diaries: result.data.diaries || [],
+          patientCards: result.data.patientCards || [],
+          diaryEmployeeAccess: result.data.diaryEmployeeAccess || [],
+        })
+      } catch (error) {
+        console.error('Ошибка загрузки данных из Supabase:', error)
+      } finally {
+        setIsLoading(false)
+      }
     }
+
+    loadSupabaseData()
   }, [dataVersion])
 
-  const patientCards = useMemo(() => readArray(['patient_cards']), [dataVersion])
+  const diaries = useMemo(() => {
+    // Используем только данные из Supabase
+    return supabaseData.diaries
+  }, [dataVersion, supabaseData.diaries])
+
+  const patientCards = useMemo(() => {
+    // Используем только данные из Supabase
+    return supabaseData.patientCards
+  }, [dataVersion, supabaseData.patientCards])
   const patientCardMap = useMemo(() => {
     const map = new Map<string, any>()
     patientCards.forEach((card: any) => {
@@ -182,7 +287,18 @@ export const AdminUsersPage = () => {
     return map
   }, [patientCards])
 
-  const diaryAssignments = useMemo(() => readObject(['diary_employee_access']), [dataVersion])
+  const diaryAssignments = useMemo(() => {
+    // Используем только данные из Supabase
+    const map: Record<string, any[]> = {}
+    supabaseData.diaryEmployeeAccess.forEach((access: any) => {
+      const diaryId = safeString(access.diary_id)
+      if (diaryId) {
+        if (!map[diaryId]) map[diaryId] = []
+        map[diaryId].push(access)
+      }
+    })
+    return map
+  }, [dataVersion, supabaseData.diaryEmployeeAccess])
 
   const baseRows = useMemo<AdminUserRow[]>(() => {
     type AggregatedEntry = { row: AdminUserRow; priority: number }
@@ -269,7 +385,8 @@ export const AdminUsersPage = () => {
       })
     }
 
-    const organizations = loadOrganizations()
+    // Используем только данные из Supabase
+    const organizations = supabaseData.organizations
     organizations.forEach((org: any, index: number) => {
       const baseId = org.id || org.user_id || `org_${index}`
       const orgType = org.type
@@ -284,7 +401,7 @@ export const AdminUsersPage = () => {
           ? [{ label: 'Город', value: String(org.city), rawValue: String(org.city) }]
           : undefined,
           payload: org,
-          sources: ['organizations'],
+          sources: ['supabase', 'organizations'],
         })
       } else {
         upsert({
@@ -294,12 +411,20 @@ export const AdminUsersPage = () => {
           contact: org.phone || org.email || null,
           roleLabel: organizationTypeLabel(orgType),
           payload: org,
-          sources: ['organizations'],
+          sources: ['supabase', 'organizations'],
         })
       }
     })
 
-    const localUsers = readArray(['local_users'])
+    // Используем только данные из Supabase
+    const supabaseUsers = supabaseData.userProfiles.map((profile: any) => ({
+      id: profile.user_id,
+      user_id: profile.user_id,
+      role: profile.role,
+      organization_id: profile.organization_id,
+      ...profile,
+    }))
+    const localUsers = supabaseUsers
     localUsers.forEach((user: any, index: number) => {
       const type = inferTypeFromUser(user)
       if (!type) return
@@ -342,11 +467,24 @@ export const AdminUsersPage = () => {
             : undefined,
         relations: relations.length ? relations : undefined,
         payload: user,
-        sources: ['local_users'],
+        sources: ['supabase', 'user_profiles'],
       })
     })
 
-    const employees = readArray(['local_employees'])
+    // Используем только данные из Supabase
+    const employees = supabaseData.userProfiles
+      .filter((profile: any) => profile.role === 'org_employee')
+      .map((profile: any) => ({
+        user_id: profile.user_id,
+        id: profile.user_id,
+        organization_id: profile.organization_id,
+        employee_role: profile.employee_role || 'caregiver',
+        role: profile.employee_role || 'caregiver',
+        first_name: profile.first_name,
+        last_name: profile.last_name,
+        phone: profile.phone,
+        ...profile,
+      }))
     employees.forEach((employee: any, index: number) => {
       const id = employee.user_id || employee.id || `employee_${index}`
       upsert({
@@ -354,7 +492,7 @@ export const AdminUsersPage = () => {
         type: 'employee',
         name: buildPersonName(employee) || employee.phone || 'Сотрудник без имени',
         contact: employee.phone || employee.email || null,
-        roleLabel: employee.role || 'Сотрудник',
+        roleLabel: employee.role || employee.employee_role || 'Сотрудник',
         relations: employee.organization_id
           ? [
               {
@@ -365,34 +503,24 @@ export const AdminUsersPage = () => {
             ]
           : undefined,
         payload: employee,
-        sources: ['local_employees'],
+        sources: ['supabase', 'user_profiles'],
       })
     })
 
-    const privateCaregivers = readArray(['private_caregiver_profiles'])
-    privateCaregivers.forEach((caregiver: any, index: number) => {
-      const id = caregiver.id || caregiver.user_id || `private_caregiver_${index}`
-      const relations: AdminUserRelation[] = []
-      if (caregiver.city) {
-        relations.push({
-          label: 'Город',
-          value: String(caregiver.city),
-          rawValue: String(caregiver.city),
-        })
-      }
-      upsert({
-        id,
-        type: 'privateCaregiver',
-        name: buildPersonName(caregiver) || caregiver.phone || 'Частная сиделка',
-        contact: caregiver.phone || caregiver.email || null,
-        roleLabel: 'Частная сиделка',
-        relations: relations.length ? relations : undefined,
-        payload: caregiver,
-        sources: ['private_caregiver_profiles'],
-      })
-    })
+    // Частные сиделки уже обработаны в блоке organizations (type='caregiver')
+    // Не используем localStorage для частных сиделок
 
-    const localClients = readArray(['local_clients'])
+    // Используем только данные из Supabase
+    const localClients = supabaseData.clients.map((client: any) => ({
+      user_id: client.user_id,
+      id: client.user_id || client.id,
+      first_name: client.first_name,
+      last_name: client.last_name,
+      phone: client.phone,
+      caregiver_id: client.caregiver_id,
+      organization_id: client.organization_id,
+      ...client,
+    }))
     localClients.forEach((client: any, index: number) => {
       const id = client.user_id || client.id || `client_${index}`
       const relations: AdminUserRelation[] = []
@@ -418,11 +546,11 @@ export const AdminUsersPage = () => {
         roleLabel: relations.length ? relations.map(item => item.label).join(' / ') : undefined,
         relations: relations.length ? relations : undefined,
         payload: client,
-        sources: ['local_clients'],
+        sources: ['supabase', 'clients'],
       })
     })
 
-    return Array.from(aggregated.values())
+    const rows = Array.from(aggregated.values())
       .map(entry => ({
         ...entry.row,
         relations: entry.row.relations
@@ -438,7 +566,16 @@ export const AdminUsersPage = () => {
         if (priorityDiff !== 0) return priorityDiff
         return a.name.localeCompare(b.name, 'ru')
       })
-  }, [dataVersion])
+    
+    console.log('✅ Сформировано строк:', rows.length, 'из них:', {
+      organizations: rows.filter(r => r.type === 'organization').length,
+      employees: rows.filter(r => r.type === 'employee').length,
+      privateCaregivers: rows.filter(r => r.type === 'privateCaregiver').length,
+      clients: rows.filter(r => r.type === 'client').length,
+    })
+    
+    return rows
+  }, [dataVersion, supabaseData])
 
   const rowLookup = useMemo(() => {
     const map = new Map<string, AdminUserRow>()
@@ -690,13 +827,14 @@ export const AdminUsersPage = () => {
     }
   }
 
-  const handleSaveContact = () => {
+  const _handleSaveContact = () => {
     if (!selectedUser) return
     updateLocalStorageRecord(selectedUser, contactValue)
     setIsEditContact(false)
   }
+  void _handleSaveContact // Prevent unused variable warning
 
-  const handleResetPassword = () => {
+  const _handleResetPassword = () => {
     if (!selectedUser) return
     try {
       if (selectedUser.sources.includes('local_users')) {
@@ -717,11 +855,76 @@ export const AdminUsersPage = () => {
       setResetMessage('Ошибка при сбросе пароля')
     }
   }
+  void _handleResetPassword // Prevent unused variable warning
 
   const renderModal = () => {
     if (!selectedUser) return null
     const diariesForUser = getUserDiaries(selectedUser)
-    const profileName = buildPersonName(selectedUser.payload || {}) || selectedUser.name
+    const payload = selectedUser.payload || {}
+    const profileName = buildPersonName(payload) || selectedUser.name
+    
+    // Извлекаем дополнительные данные в зависимости от типа пользователя
+    const getAdditionalFields = () => {
+      switch (selectedUser.type) {
+        case 'organization': {
+          return {
+            organizationType: payload.type || payload.organization_type,
+            address: payload.address,
+            city: payload.city,
+            email: payload.email || (selectedUser.contact?.includes('@') ? selectedUser.contact : null),
+            phone: payload.phone || (selectedUser.contact?.includes('@') ? null : selectedUser.contact),
+            userId: payload.user_id || selectedUser.id,
+            organizationId: payload.id,
+            createdAt: payload.created_at,
+            updatedAt: payload.updated_at,
+          }
+        }
+        case 'employee': {
+          return {
+            firstName: payload.first_name,
+            lastName: payload.last_name,
+            phone: payload.phone || selectedUser.contact,
+            email: payload.email || (selectedUser.contact?.includes('@') ? selectedUser.contact : null),
+            employeeRole: payload.employee_role || payload.role,
+            organizationId: payload.organization_id,
+            userId: payload.user_id || selectedUser.id,
+            createdAt: payload.created_at,
+            updatedAt: payload.updated_at,
+          }
+        }
+        case 'privateCaregiver': {
+          return {
+            firstName: payload.first_name,
+            lastName: payload.last_name,
+            phone: payload.phone || selectedUser.contact,
+            email: payload.email || (selectedUser.contact?.includes('@') ? selectedUser.contact : null),
+            city: payload.city,
+            userId: payload.user_id || selectedUser.id,
+            organizationId: payload.id,
+            createdAt: payload.created_at,
+            updatedAt: payload.updated_at,
+          }
+        }
+        case 'client': {
+          return {
+            firstName: payload.first_name,
+            lastName: payload.last_name,
+            phone: payload.phone || selectedUser.contact,
+            email: payload.email || (selectedUser.contact?.includes('@') ? selectedUser.contact : null),
+            caregiverId: payload.caregiver_id,
+            organizationId: payload.organization_id,
+            userId: payload.user_id || selectedUser.id,
+            createdAt: payload.created_at,
+            updatedAt: payload.updated_at,
+          }
+        }
+        default:
+          return {}
+      }
+    }
+    
+    const additionalFields = getAdditionalFields()
+    
     const describeAccess = (diary: any) => {
       switch (selectedUser.type) {
         case 'organization':
@@ -744,7 +947,7 @@ export const AdminUsersPage = () => {
     return (
       <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center px-4">
         <div className="bg-white rounded-3xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-          <div className="px-6 py-5 border-b border-gray-200 flex items-center justify-between gap-6">
+          <div className="px-6 pb-5 pt-0 border-b border-gray-200 flex items-center justify-between gap-6">
             <div className="flex-1">
               <p className="text-xs uppercase text-gray-400">{typeLabels[selectedUser.type]}</p>
               <h2 className="text-xl font-semibold text-gray-800">{selectedUser.name}</h2>
@@ -776,48 +979,132 @@ export const AdminUsersPage = () => {
             <section className="space-y-3">
               <h3 className="text-lg font-semibold text-gray-800">Профиль</h3>
               <div className="grid gap-3 sm:grid-cols-2">
+                {/* Основная информация */}
                 <div className="bg-gray-50 rounded-2xl p-4">
-                  <p className="text-xs uppercase text-gray-500">Имя</p>
-                  <p className="text-sm text-gray-800">{profileName}</p>
-                </div>
-                <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs uppercase text-gray-500">Контакты</p>
-                      <p className="text-sm text-gray-800">{selectedUser.contact || '—'}</p>
-                    </div>
-                    {selectedUser.sources.some(source =>
-                      ['local_employees', 'local_clients', 'local_users'].includes(source)
-                    ) && (
-                      <Button variant="outline" size="sm" onClick={() => setIsEditContact(true)}>
-                        Изменить
-                      </Button>
-                    )}
-                  </div>
-                  {isEditContact && (
-                    <div className="space-y-2">
-                      <Input
-                        value={contactValue}
-                        onChange={event => setContactValue(event.target.value)}
-                        placeholder="Введите контакт"
-                      />
-                      <div className="flex gap-2">
-                        <Button size="sm" onClick={handleSaveContact}>
-                          Сохранить
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => setIsEditContact(false)}>
-                          Отмена
-                        </Button>
-                      </div>
+                  <p className="text-xs uppercase text-gray-500 mb-1">Название / Имя</p>
+                  <p className="text-sm font-medium text-gray-800">{profileName || '—'}</p>
+                  {selectedUser.type === 'organization' && additionalFields.organizationType && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      Тип: {organizationTypeLabel(additionalFields.organizationType)}
+                    </p>
+                  )}
+                  {(selectedUser.type === 'employee' || selectedUser.type === 'privateCaregiver' || selectedUser.type === 'client') && (
+                    <div className="mt-1 space-y-0.5">
+                      {additionalFields.firstName && (
+                        <p className="text-xs text-gray-500">Имя: {additionalFields.firstName}</p>
+                      )}
+                      {additionalFields.lastName && (
+                        <p className="text-xs text-gray-500">Фамилия: {additionalFields.lastName}</p>
+                      )}
                     </div>
                   )}
                 </div>
-                <div className="bg-gray-50 rounded-2xl p-4">
-                  <p className="text-xs uppercase text-gray-500">Роль</p>
-                  <p className="text-sm text-gray-800">{selectedUser.roleLabel || '—'}</p>
+
+                {/* Контакты */}
+                <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
+                  <div>
+                    <p className="text-xs uppercase text-gray-500 mb-1">Контакты</p>
+                    <div className="space-y-1">
+                      {additionalFields.phone && (
+                        <p className="text-sm text-gray-800">
+                          📞 {additionalFields.phone}
+                        </p>
+                      )}
+                      {additionalFields.email && (
+                        <p className="text-sm text-gray-800">
+                          ✉️ {additionalFields.email}
+                        </p>
+                      )}
+                      {!additionalFields.phone && !additionalFields.email && (
+                        <p className="text-sm text-gray-500">{selectedUser.contact || '—'}</p>
+                      )}
+                    </div>
+                  </div>
                 </div>
+
+                {/* Роль / Тип */}
                 <div className="bg-gray-50 rounded-2xl p-4">
-                  <p className="text-xs uppercase text-gray-500">Источник данных</p>
+                  <p className="text-xs uppercase text-gray-500 mb-1">Роль / Тип</p>
+                  <p className="text-sm font-medium text-gray-800">{selectedUser.roleLabel || '—'}</p>
+                  {selectedUser.type === 'employee' && additionalFields.employeeRole && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      Должность: {additionalFields.employeeRole === 'manager' ? 'Руководитель' : 
+                                  additionalFields.employeeRole === 'caregiver' ? 'Сиделка' : 
+                                  additionalFields.employeeRole === 'doctor' ? 'Врач' : 
+                                  additionalFields.employeeRole}
+                    </p>
+                  )}
+                </div>
+
+                {/* Дополнительная информация в зависимости от типа */}
+                {selectedUser.type === 'organization' && (
+                  <>
+                    {additionalFields.address && (
+                      <div className="bg-gray-50 rounded-2xl p-4">
+                        <p className="text-xs uppercase text-gray-500 mb-1">Адрес</p>
+                        <p className="text-sm text-gray-800">{additionalFields.address}</p>
+                      </div>
+                    )}
+                    {additionalFields.city && (
+                      <div className="bg-gray-50 rounded-2xl p-4">
+                        <p className="text-xs uppercase text-gray-500 mb-1">Город</p>
+                        <p className="text-sm text-gray-800">{additionalFields.city}</p>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                {selectedUser.type === 'privateCaregiver' && additionalFields.city && (
+                  <div className="bg-gray-50 rounded-2xl p-4">
+                    <p className="text-xs uppercase text-gray-500 mb-1">Город</p>
+                    <p className="text-sm text-gray-800">{additionalFields.city}</p>
+                  </div>
+                )}
+
+                {/* Идентификаторы */}
+                <div className="bg-gray-50 rounded-2xl p-4">
+                  <p className="text-xs uppercase text-gray-500 mb-1">Идентификаторы</p>
+                  <div className="space-y-1">
+                    {additionalFields.userId && (
+                      <p className="text-xs text-gray-600 break-all">
+                        User ID: <span className="font-mono">{additionalFields.userId}</span>
+                      </p>
+                    )}
+                    {additionalFields.organizationId && selectedUser.type === 'organization' && (
+                      <p className="text-xs text-gray-600 break-all">
+                        Org ID: <span className="font-mono">{additionalFields.organizationId}</span>
+                      </p>
+                    )}
+                    {additionalFields.organizationId && selectedUser.type === 'employee' && (
+                      <p className="text-xs text-gray-600 break-all">
+                        Организация ID: <span className="font-mono">{additionalFields.organizationId}</span>
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Даты создания/обновления */}
+                {(additionalFields.createdAt || additionalFields.updatedAt) && (
+                  <div className="bg-gray-50 rounded-2xl p-4">
+                    <p className="text-xs uppercase text-gray-500 mb-1">Даты</p>
+                    <div className="space-y-1">
+                      {additionalFields.createdAt && (
+                        <p className="text-xs text-gray-600">
+                          Создан: {new Date(additionalFields.createdAt).toLocaleString('ru-RU')}
+                        </p>
+                      )}
+                      {additionalFields.updatedAt && (
+                        <p className="text-xs text-gray-600">
+                          Обновлён: {new Date(additionalFields.updatedAt).toLocaleString('ru-RU')}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Источник данных */}
+                <div className="bg-gray-50 rounded-2xl p-4">
+                  <p className="text-xs uppercase text-gray-500 mb-1">Источник данных</p>
                   <div className="flex flex-wrap gap-2 mt-1">
                     {selectedUser.sources.map(source => (
                       <span
@@ -835,15 +1122,78 @@ export const AdminUsersPage = () => {
             {selectedUser.relations && selectedUser.relations.length > 0 && (
               <section className="space-y-3">
                 <h3 className="text-lg font-semibold text-gray-800">Связанные сущности</h3>
-                <div className="flex flex-wrap gap-2">
-                  {selectedUser.relations.map(relation => (
-                    <span
-                      key={`relation-${relation.label}-${relation.value}`}
-                      className="inline-flex items-center px-3 py-1 rounded-full bg-[#F7FCFD] text-xs font-medium text-[#0A6D83] border border-[#55ACBF]/30"
-                    >
-                      {relation.label}: {relation.value}
-                    </span>
-                  ))}
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {selectedUser.relations.map(relation => {
+                    const relatedEntity = relation.rawValue ? rowLookup.get(String(relation.rawValue)) : undefined
+                    return (
+                      <div
+                        key={`relation-${relation.label}-${relation.value}`}
+                        className="bg-gray-50 rounded-2xl p-4"
+                      >
+                        <p className="text-xs uppercase text-gray-500 mb-1">{relation.label}</p>
+                        <p className="text-sm font-medium text-gray-800">{relation.value}</p>
+                        {relatedEntity && (
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-white text-[10px] font-medium text-gray-600 border border-gray-200">
+                              {typeLabels[relatedEntity.type]}
+                            </span>
+                            {relatedEntity.contact && (
+                              <span className="text-[10px] text-gray-500">{relatedEntity.contact}</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            )}
+            
+            {/* Дополнительная информация для клиентов */}
+            {selectedUser.type === 'client' && (
+              <section className="space-y-3">
+                <h3 className="text-lg font-semibold text-gray-800">Связи клиента</h3>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {additionalFields.caregiverId && (
+                    <div className="bg-gray-50 rounded-2xl p-4">
+                      <p className="text-xs uppercase text-gray-500 mb-1">Приглашён сиделкой</p>
+                      {(() => {
+                        const caregiver = rowLookup.get(String(additionalFields.caregiverId))
+                        return caregiver ? (
+                          <>
+                            <p className="text-sm font-medium text-gray-800">{caregiver.name}</p>
+                            {caregiver.contact && (
+                              <p className="text-xs text-gray-500 mt-1">{caregiver.contact}</p>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-sm text-gray-600 break-all">
+                            ID: <span className="font-mono">{additionalFields.caregiverId}</span>
+                          </p>
+                        )
+                      })()}
+                    </div>
+                  )}
+                  {additionalFields.organizationId && (
+                    <div className="bg-gray-50 rounded-2xl p-4">
+                      <p className="text-xs uppercase text-gray-500 mb-1">Организация</p>
+                      {(() => {
+                        const org = rowLookup.get(String(additionalFields.organizationId))
+                        return org ? (
+                          <>
+                            <p className="text-sm font-medium text-gray-800">{org.name}</p>
+                            {org.contact && (
+                              <p className="text-xs text-gray-500 mt-1">{org.contact}</p>
+                            )}
+                          </>
+                        ) : (
+                          <p className="text-sm text-gray-600 break-all">
+                            ID: <span className="font-mono">{additionalFields.organizationId}</span>
+                          </p>
+                        )
+                      })()}
+                    </div>
+                  )}
                 </div>
               </section>
             )}
@@ -984,20 +1334,14 @@ export const AdminUsersPage = () => {
               </div>
             </section>
 
+            {/* Управление - только для админов, функционал будет реализован позже */}
             <section className="space-y-3">
               <h3 className="text-lg font-semibold text-gray-800">Управление</h3>
-              <div className="flex flex-wrap gap-3">
-                <Button variant="outline" onClick={handleResetPassword}>
-                  Сбросить пароль
-                </Button>
-                <Button variant="outline" disabled>
-                  Заблокировать доступ
-                </Button>
-                <Button variant="outline" disabled>
-                  Удалить пользователя
-                </Button>
+              <div className="bg-gray-50 rounded-2xl p-4">
+                <p className="text-sm text-gray-600">
+                  Функции управления пользователями будут доступны в следующих версиях админ-панели.
+                </p>
               </div>
-              {resetMessage && <p className="text-sm text-gray-600">{resetMessage}</p>}
             </section>
           </div>
         </div>
@@ -1010,9 +1354,7 @@ export const AdminUsersPage = () => {
       <div className="space-y-2">
         <h2 className="text-2xl font-bold text-gray-800">Пользователи и доступы</h2>
         <p className="text-sm text-gray-600 leading-relaxed max-w-3xl">
-          Панель показывает всех, кто имеет отношение к дневникам: организации, сотрудников, частных сиделок и клиентов.
-          Используйте карточки-счётчики или поиск, чтобы быстро найти нужного человека, а подробности смотрите в
-          карточке профиля.
+          Просмотр организаций, сотрудников и клиентов, анализ их активности.
         </p>
       </div>
 
@@ -1058,12 +1400,6 @@ export const AdminUsersPage = () => {
       </div>
 
       <div className="bg-white border border-gray-200 rounded-3xl p-6 space-y-6 shadow-sm">
-        <section className="space-y-2">
-          <p className="text-xs text-gray-500">
-            Колонка «Роль и связи» показывает основную роль пользователя и через кого он получил доступ: пригласившую
-            сиделку, организацию или другие связанные сущности.
-          </p>
-        </section>
 
         <section className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center gap-4 justify-between">
@@ -1091,10 +1427,14 @@ export const AdminUsersPage = () => {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => setDataVersion(prev => prev + 1)}
+              onClick={() => {
+                setDataVersion(prev => prev + 1)
+                setIsLoading(true)
+              }}
               className="whitespace-nowrap"
+              disabled={isLoading}
             >
-              Обновить данные
+              {isLoading ? 'Загрузка...' : 'Обновить данные'}
             </Button>
           </div>
         </section>
@@ -1219,7 +1559,7 @@ export const AdminUsersPage = () => {
                         : 'Клиент'}
                     </span>
                     <button
-                      onClick={() => {/* handleRowClick не определен */}}
+                      onClick={() => handleOpenUser(row)}
                       className="text-xs font-semibold text-[#0A6D83] underline underline-offset-4"
                     >
                       Открыть профиль
@@ -1268,9 +1608,6 @@ export const AdminUsersPage = () => {
         </section>
       </div>
 
-      <div className="text-xs text-gray-400 text-right">
-        Шаг 12.3 — собран обзор пользователей из локальных данных, готово к интеграции Supabase
-      </div>
 
       {renderModal()}
     </div>

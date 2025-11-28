@@ -31,3 +31,9 @@ dist-ssr
 .env.docker
 # Но НЕ игнорируем .env.production (может быть нужен для деплоя)
 !.env.production.example
+
+# Backups (содержат персональные данные!)
+backups/
+*.sql
+*.dump
+*.backup

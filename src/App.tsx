@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { MainLayout, AuthLayout, SimpleLayout } from '@/components/layout'
 import { ProtectedRoute } from '@/components/ProtectedRoute'
 import {
+  LandingPage,
   RegisterPage,
   LoginPage,
   EmailConfirmationPage,
@@ -28,13 +29,14 @@ import {
 } from '@/pages'
 
 // Обертка для защищенных роутов с MainLayout
-const ProtectedLayout = () => {
+const _ProtectedLayout = () => {
   return (
     <ProtectedRoute>
       <MainLayout />
     </ProtectedRoute>
   )
 }
+void _ProtectedLayout // Prevent unused variable warning
 
 // Обертка для защищенных роутов без Header (SimpleLayout)
 const ProtectedSimpleLayout = () => {
@@ -102,6 +104,9 @@ const ProtectedInviteClientPage = () => {
 function App() {
   return (
     <Routes>
+      {/* Главная страница - лендинг */}
+      <Route path="/" element={<LandingPage />} />
+      
       <Route element={<AuthLayout />}>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
@@ -110,9 +115,6 @@ function App() {
       </Route>
       <Route element={<ProtectedSimpleLayout />}>
         <Route path="/profile/setup" element={<ProfileSetupPage />} />
-      </Route>
-      <Route element={<ProtectedLayout />}>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
       </Route>
       {/* DashboardPage без Header (свой локальный header с иконкой профиля) */}
       <Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />

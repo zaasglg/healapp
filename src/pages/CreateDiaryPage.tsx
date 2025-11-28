@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/authStore'
 import { supabase } from '@/lib/supabase'
 import { Button, Modal, Input } from '@/components/ui'
+import { canCreateDiariesAndCards } from '@/utils/employeePermissions'
 
 type OrganizationType = 'pension' | 'patronage_agency' | 'caregiver'
 
@@ -91,14 +92,23 @@ export const CreateDiaryPage = () => {
       return
     }
 
-    // Проверяем, является ли пользователь сотрудником организации
-    const userRole = user.user_metadata?.user_role || user.user_metadata?.role
-    if (userRole === 'org_employee') {
-      // Сотрудники организаций не могут создавать дневники
-      alert('У вас нет прав на создание дневников. Обратитесь к администратору организации.')
-      navigate('/dashboard')
-      return
+    // Проверяем права на создание дневников
+    const checkCreatePermission = async () => {
+      try {
+        const hasPermission = await canCreateDiariesAndCards(user)
+        if (!hasPermission) {
+          alert('У вас нет прав на создание дневников. Обратитесь к администратору организации.')
+          navigate('/dashboard')
+          return
+        }
+      } catch (error) {
+        console.error('Ошибка проверки прав на создание дневников:', error)
+        alert('Ошибка проверки прав доступа')
+        navigate('/dashboard')
+        return
+      }
     }
+    checkCreatePermission()
 
     // Загружаем доступные карточки из Supabase
     const loadAvailableCards = async () => {
@@ -129,10 +139,13 @@ export const CreateDiaryPage = () => {
           return
         }
 
-        // Загружаем существующие дневники из Supabase
+        // Загружаем существующие активные дневники из Supabase
+        // ВАЖНО: RLS политики автоматически отфильтруют дневники, к которым нет доступа
+        // Для руководителей патронажных агентств теперь доступны все дневники организации (как в пансионатах)
         const { data: allDiaries, error: diariesError } = await supabase
           .from('diaries')
-          .select('patient_card_id')
+          .select('patient_card_id, status')
+          .eq('status', 'active')
 
         if (diariesError) {
           console.error('Ошибка загрузки дневников:', diariesError)
@@ -149,7 +162,9 @@ export const CreateDiaryPage = () => {
           return
         }
 
-        // Получаем ID карточек, для которых уже есть дневники
+        // Получаем ID карточек, для которых уже есть активные дневники
+        // ВАЖНО: Если дневник не загрузился из-за RLS, значит у пользователя нет к нему доступа,
+        // и карточка должна быть доступна для создания нового дневника
         const cardsWithDiaries = new Set(
           (allDiaries || []).map((d: any) => d.patient_card_id).filter(Boolean)
         )

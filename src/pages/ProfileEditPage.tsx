@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -51,6 +51,9 @@ export const ProfileEditPage = () => {
   const [isLoadingProfile, setIsLoadingProfile] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null)
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   // Форма для частной сиделки
   const caregiverForm = useForm<CaregiverFormData>({
@@ -98,6 +101,7 @@ export const ProfileEditPage = () => {
               .single()
 
             if (!dbError && data) {
+              setAvatarUrl(data.avatar_url || null)
               if (userType === 'caregiver') {
                 caregiverForm.reset({
                   firstName: data.first_name || '',
@@ -504,62 +508,196 @@ export const ProfileEditPage = () => {
     }
   }
 
+  // Обработка загрузки аватара
+  const handleAvatarClick = () => {
+    fileInputRef.current?.click()
+  }
+
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file || !user) return
+
+    // Проверка типа файла
+    if (!file.type.startsWith('image/')) {
+      alert('Пожалуйста, выберите изображение')
+      return
+    }
+
+    // Проверка размера (макс 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      alert('Размер файла не должен превышать 5MB')
+      return
+    }
+
+    setIsUploadingAvatar(true)
+    setError(null)
+
+    try {
+      // Генерируем уникальное имя файла
+      const fileExt = file.name.split('.').pop()
+      const fileName = `${user.id}-${Date.now()}.${fileExt}`
+      const filePath = fileName // Убираем префикс avatars/, так как bucket уже называется avatars
+
+      console.log('ProfileEditPage: Uploading avatar to bucket "avatars", filePath:', filePath)
+
+      // Загружаем файл в Supabase Storage напрямую
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from('avatars')
+        .upload(filePath, file, {
+          cacheControl: '3600',
+          upsert: true
+        })
+
+      if (uploadError) {
+        console.error('ProfileEditPage: Upload error:', uploadError)
+        console.error('ProfileEditPage: Upload error details:', {
+          message: uploadError.message,
+          statusCode: (uploadError as any).statusCode,
+          error: (uploadError as any).error,
+        })
+        
+        // Проверяем тип ошибки и показываем понятное сообщение
+        let errorMessage = 'Не удалось загрузить аватар. '
+        
+        if (uploadError.message?.includes('Bucket not found') || uploadError.message?.includes('not found')) {
+          errorMessage += 'Bucket "avatars" не найден. Убедитесь, что bucket создан в Supabase Storage.'
+        } else if (uploadError.message?.includes('row-level security') || uploadError.message?.includes('RLS')) {
+          errorMessage += 'Нет прав на загрузку файла. Обратитесь к администратору для настройки политик Storage.'
+        } else if (uploadError.message?.includes('JWT')) {
+          errorMessage += 'Ошибка аутентификации. Попробуйте выйти и войти снова.'
+        } else if (uploadError.message?.includes('size') || uploadError.message?.includes('limit')) {
+          errorMessage += 'Файл слишком большой. Максимальный размер: 5MB.'
+        } else {
+          errorMessage += uploadError.message || 'Попробуйте еще раз.'
+        }
+        
+        throw new Error(errorMessage)
+      }
+
+      console.log('ProfileEditPage: File uploaded successfully:', uploadData)
+
+      // Получаем публичный URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('avatars')
+        .getPublicUrl(filePath)
+      
+      console.log('ProfileEditPage: Public URL generated:', publicUrl)
+
+      // Обновляем avatar_url в БД сразу
+      const { error: updateError } = await supabase
+        .from('organizations')
+        .update({ avatar_url: publicUrl })
+        .eq('user_id', user.id)
+
+      if (updateError) {
+        throw updateError
+      }
+
+      // Обновляем локальное состояние
+      setAvatarUrl(publicUrl)
+      setSuccessMessage('Аватар успешно загружен!')
+    } catch (error: any) {
+      console.error('Ошибка загрузки аватара:', error)
+      setError('Не удалось загрузить аватар. Попробуйте еще раз.')
+    } finally {
+      setIsUploadingAvatar(false)
+      // Сбрасываем input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+  }
+
   const onSubmitOrganization = async (data: OrganizationFormData) => {
-    if (!user || !organizationType) return
+    if (!user || !organizationType) {
+      console.error('ProfileEditPage: Missing user or organizationType', { user: !!user, organizationType })
+      setError('Ошибка: не удалось определить пользователя или тип организации')
+      return
+    }
 
     setIsLoading(true)
     setError(null)
     setSuccessMessage(null)
 
-    try {
-      // Пытаемся сохранить в БД (если таблица существует)
-      try {
-        const { error: updateError } = await supabase
-          .from('organizations')
-          .update({
-            name: data.name,
-            phone: data.phone,
-            address: data.address,
-          })
-          .eq('user_id', user.id)
-
-        if (updateError) {
-          throw updateError
-        }
-
-        setSuccessMessage('Профиль успешно обновлен!')
-        
-        // Редирект на страницу настроек профиля через 2 секунды
-        setTimeout(() => {
-          navigate('/profile')
-        }, 2000)
-      } catch (dbError: any) {
-        // Если таблицы нет, сохраняем в metadata (для фронтенда)
-        const { error: updateError } = await supabase.auth.updateUser({
-          data: {
-            profile_data: {
-              name: data.name,
-              phone: data.phone,
-              address: data.address,
-            },
-          },
-        })
-
-        if (updateError) {
-          throw updateError
-        }
-
-        setSuccessMessage('Профиль успешно обновлен!')
-        
-        // Редирект на страницу настроек профиля через 2 секунды
-        setTimeout(() => {
-          navigate('/profile')
-        }, 2000)
+    console.log('ProfileEditPage: Starting save organization profile', {
+      userId: user.id,
+      organizationType,
+      data: {
+        name: data.name,
+        phone: data.phone,
+        address: data.address,
+        hasAvatar: !!avatarUrl,
       }
+    })
+
+    try {
+      // Сохраняем в БД (включая avatar_url если он был загружен)
+      const updateData: any = {
+        name: data.name.trim(),
+        phone: data.phone.trim(),
+        address: data.address.trim(),
+      }
+      
+      if (avatarUrl) {
+        updateData.avatar_url = avatarUrl
+      }
+
+      console.log('ProfileEditPage: Updating organization with data:', updateData)
+
+      // Сначала проверяем, существует ли запись
+      const { data: existingOrg, error: checkError } = await supabase
+        .from('organizations')
+        .select('id, name, phone, address')
+        .eq('user_id', user.id)
+        .single()
+
+      if (checkError && checkError.code !== 'PGRST116') {
+        console.error('ProfileEditPage: Error checking existing organization:', checkError)
+        throw new Error(`Ошибка проверки записи: ${checkError.message}`)
+      }
+
+      if (!existingOrg) {
+        console.error('ProfileEditPage: Organization not found for user_id:', user.id)
+        throw new Error('Организация не найдена. Обратитесь в поддержку.')
+      }
+
+      console.log('ProfileEditPage: Existing organization found:', existingOrg)
+
+      // Обновляем запись
+      const { data: updatedData, error: updateError } = await supabase
+        .from('organizations')
+        .update(updateData)
+        .eq('user_id', user.id)
+        .select()
+
+      if (updateError) {
+        console.error('ProfileEditPage: Error updating organization:', updateError)
+        console.error('ProfileEditPage: Update error details:', {
+          code: updateError.code,
+          message: updateError.message,
+          details: updateError.details,
+          hint: updateError.hint,
+        })
+        throw updateError
+      }
+
+      if (!updatedData || updatedData.length === 0) {
+        console.error('ProfileEditPage: No data returned after update')
+        throw new Error('Не удалось обновить профиль. Попробуйте еще раз.')
+      }
+
+      console.log('✅ ProfileEditPage: Organization profile updated successfully:', updatedData[0])
+      setSuccessMessage('Профиль успешно обновлен!')
+      
+      // Редирект на страницу профиля через 2 секунды после успешного сохранения
+      setTimeout(() => {
+        navigate('/profile')
+      }, 2000)
     } catch (err: any) {
-      setError(translateError(err))
-    } finally {
-      setIsLoading(false)
+      console.error('ProfileEditPage: Error saving organization profile:', err)
+      const errorMessage = err?.message || translateError(err) || 'Не удалось сохранить изменения. Попробуйте ещё раз.'
+      setError(errorMessage)
+      setIsLoading(false) // Убираем loading, чтобы пользователь мог попробовать снова
     }
   }
 
@@ -933,8 +1071,58 @@ export const ProfileEditPage = () => {
           </div>
         )}
 
-        <div className="bg-white rounded-3xl shadow-md p-6">
+          <div className="bg-white rounded-3xl shadow-md p-6">
           <form onSubmit={organizationForm.handleSubmit(onSubmitOrganization)} className="space-y-6">
+            {/* Загрузка аватара */}
+            <div className="flex flex-col items-center mb-6">
+              <div 
+                onClick={handleAvatarClick}
+                className="w-24 h-24 rounded-full flex items-center justify-center overflow-hidden cursor-pointer relative group bg-gray-100 mb-2"
+              >
+                {avatarUrl ? (
+                  <img 
+                    src={avatarUrl} 
+                    alt="Аватар" 
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <img 
+                    src="/icons/Иконка профиль.png" 
+                    alt="Профиль" 
+                    className="w-full h-full object-contain"
+                  />
+                )}
+                {isUploadingAvatar && (
+                  <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                    <div className="animate-spin w-8 h-8 border-2 border-white border-t-transparent rounded-full"></div>
+                  </div>
+                )}
+                {!isUploadingAvatar && (
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 flex items-center justify-center transition-colors">
+                    <svg className="w-8 h-8 text-white opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleAvatarClick}
+                className="text-sm text-gray-600 hover:text-gray-800 transition-colors"
+                disabled={isUploadingAvatar}
+              >
+                {isUploadingAvatar ? 'Загрузка...' : 'Выбрать аватар'}
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleAvatarChange}
+                className="hidden"
+              />
+            </div>
+
             <Input
               label="Название организации"
               placeholder="Введите название организации"

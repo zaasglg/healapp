@@ -46,6 +46,13 @@ const ROLE_LABELS: Record<string, string> = {
   doctor: 'Врач',
 }
 
+const ROLE_DESCRIPTIONS: Record<string, string> = {
+  admin: 'Создание дневников и карточек подопечных, изменение и заполнение дневников',
+  manager: 'Создание дневников и карточек, редактирование, раздача доступа клиентам, управление доступом сотрудников, заполнение дневников',
+  caregiver: 'Просмотр и заполнение назначенных дневников',
+  doctor: 'Просмотр и заполнение назначенных дневников',
+}
+
 const formatDate = (iso: string | undefined) => {
   if (!iso) return 'Неизвестно'
   const date = new Date(iso)
@@ -262,18 +269,62 @@ export const EmployeesPage = () => {
     const orgType = (user.user_metadata?.organization_type ?? null) as OrganizationType
     const userRole = user.user_metadata?.user_role as string | undefined
 
+    // Разрешаем доступ для организаций и руководителей/администраторов
     if (!isOrganization(orgType)) {
       if (userRole === 'org_employee') {
-        navigate('/dashboard')
+        // Проверяем, является ли сотрудник руководителем или администратором
+        const checkEmployeeRole = async () => {
+          try {
+            const { data: employeeData, error: employeeError } = await supabase
+              .from('organization_employees')
+              .select('role, organization_id')
+              .eq('user_id', user.id)
+              .maybeSingle()
+            
+            if (!employeeError && employeeData && (employeeData.role === 'manager' || employeeData.role === 'admin')) {
+              // Руководитель или администратор - разрешаем доступ
+              console.log('[EmployeesPage] Manager/Admin access granted:', employeeData.role)
+            } else {
+              navigate('/dashboard')
+              setIsLoading(false)
+            }
+          } catch (error) {
+            console.error('[EmployeesPage] Error checking employee role:', error)
+            navigate('/dashboard')
+            setIsLoading(false)
+          }
+        }
+        
+        checkEmployeeRole()
+        return
       } else {
-        setError('Эта страница доступна только организациям.')
+        setError('Эта страница доступна только организациям и руководителям.')
+        setIsLoading(false)
+        return
       }
-      setIsLoading(false)
-      return
     }
 
     // Загружаем или создаем запись организации и получаем ее id
     const ensureOrganizationExists = async (): Promise<string | null> => {
+      // Для руководителей получаем organization_id из organization_employees
+      if (userRole === 'org_employee') {
+        try {
+          const { data: employeeData, error: employeeError } = await supabase
+            .from('organization_employees')
+            .select('organization_id')
+            .eq('user_id', user.id)
+            .maybeSingle()
+          
+          if (!employeeError && employeeData?.organization_id) {
+            console.log('[EmployeesPage] Loaded organization_id from organization_employees:', employeeData.organization_id)
+            return employeeData.organization_id
+          }
+        } catch (error) {
+          console.error('[EmployeesPage] Error loading organization_id from organization_employees:', error)
+        }
+        return null
+      }
+      
       if (!orgType) return null
       
       try {
@@ -569,6 +620,16 @@ export const EmployeesPage = () => {
               onChange={event => setSelectedRole(event.target.value)}
               options={ROLE_OPTIONS}
             />
+            {selectedRole && (
+              <div className="bg-gray-50 rounded-xl p-3 border border-gray-200">
+                <p className="text-xs font-semibold text-gray-700 mb-1">
+                  {ROLE_LABELS[selectedRole] ? `Права ${ROLE_LABELS[selectedRole].toLowerCase()}:` : 'Права доступа:'}
+                </p>
+                <p className="text-xs text-gray-600">
+                  {ROLE_DESCRIPTIONS[selectedRole] || 'Права не определены'}
+                </p>
+              </div>
+            )}
             <Button onClick={handleGenerateInvite} fullWidth size="lg" isLoading={isGenerating} disabled={isGenerating}>
               {isGenerating ? 'Создание ссылки...' : 'Создать пригласительную ссылку'}
             </Button>

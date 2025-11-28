@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { Button, Input } from '@/components/ui'
+import { canCreateDiariesAndCards } from '@/utils/employeePermissions'
 
 interface DashboardPatientCard {
   id: string
@@ -71,6 +72,7 @@ export const DashboardPage = () => {
   const { user } = useAuthStore()
   const [searchQuery, setSearchQuery] = useState('')
   const [userRole, setUserRole] = useState<string | undefined>(user?.user_metadata?.user_role)
+  const [canCreate, setCanCreate] = useState(false)
 
   // Загружаем роль из user_profiles, если не найдена в user_metadata
   useEffect(() => {
@@ -85,7 +87,6 @@ export const DashboardPage = () => {
         setUserRole(roleFromMetadata)
         return
       }
-
       // Иначе загружаем из user_profiles
       try {
         const { data: profileData, error: profileError } = await supabase
@@ -106,6 +107,24 @@ export const DashboardPage = () => {
     }
 
     loadUserRole()
+  }, [user])
+
+  // Проверяем права на создание дневников
+  useEffect(() => {
+    const checkCreatePermission = async () => {
+      if (!user) {
+        setCanCreate(false)
+        return
+      }
+      try {
+        const hasPermission = await canCreateDiariesAndCards(user)
+        setCanCreate(hasPermission)
+      } catch (error) {
+        console.error('Ошибка проверки прав на создание:', error)
+        setCanCreate(false)
+      }
+    }
+    checkCreatePermission()
   }, [user])
 
   const organizationType = user?.user_metadata?.organization_type
@@ -212,7 +231,7 @@ export const DashboardPage = () => {
   }, [diaries, searchQuery])
 
   const handleCreateDiary = () => {
-    if (isCaregiver || isEmployee) return
+    if (!canCreate) return
     navigate('/diaries/new')
   }
 
@@ -338,7 +357,7 @@ export const DashboardPage = () => {
       </div>
 
       {/* Кнопка создания нового дневника внизу страницы (fixed) */}
-      {!isLoading && !isError && !isCaregiver && !isEmployee && (
+      {!isLoading && !isError && canCreate && (
         <div className="fixed bottom-0 left-0 right-0 bg-gray-100 p-4 shadow-lg max-w-md mx-auto">
           <Button
             onClick={handleCreateDiary}

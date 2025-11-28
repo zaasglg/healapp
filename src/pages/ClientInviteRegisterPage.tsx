@@ -6,6 +6,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Button, Input } from '@/components/ui'
 import { useAuthStore } from '@/store/authStore'
 import { supabase } from '@/lib/supabase'
+import { getFunctionUrl } from '@/utils/supabaseConfig'
 // Убрано: импорты localStorage утилит (все через бэкенд)
 
 // Убрано: DiaryRecord (теперь используется тип из Supabase)
@@ -52,6 +53,7 @@ export const ClientInviteRegisterPage = () => {
   // const { setUser } = useAuthStore()
   // const diaryId = searchParams.get('diary') || ''
   const token = searchParams.get('token') || ''
+  const typeParam = (searchParams.get('type') || '').toLowerCase()
   // flowType будет определен после валидации токена
   const [flowType, setFlowType] = useState<'organization' | 'caregiver' | null>(null)
 
@@ -59,6 +61,7 @@ export const ClientInviteRegisterPage = () => {
   const [error, setError] = useState<string | null>(null)
   const [inviteData, setInviteData] = useState<any | null>(null)
   const [diaryInfo, setDiaryInfo] = useState<any | null>(null)
+  const [isAdminStatic, setIsAdminStatic] = useState(false)
 
   const {
     register,
@@ -69,6 +72,11 @@ export const ClientInviteRegisterPage = () => {
   })
 
   useEffect(() => {
+    // Если ссылка помечена type=admin — сразу включаем простой флоу (без привязок)
+    if (typeParam === 'admin') {
+      setIsAdminStatic(true)
+      setFlowType('caregiver')
+    }
     if (!token) {
       setStatus('invalid')
       setError('Ссылка недействительна. Проверьте корректность приглашения.')
@@ -108,17 +116,21 @@ export const ClientInviteRegisterPage = () => {
         }
 
         // Определяем тип приглашения по данным токена
-        const detectedInviteType = validationResult.invite_type as 'organization_client' | 'caregiver_client'
-        
-        if (detectedInviteType !== 'organization_client' && detectedInviteType !== 'caregiver_client') {
-          setStatus('invalid')
-          setError('Неверный тип пригласительной ссылки.')
-          return
-        }
+        const detectedInviteType = validationResult.invite_type as 'organization_client' | 'caregiver_client' | 'admin_static'
 
         if (detectedInviteType === 'organization_client') {
-          setFlowType('organization')
+          // Если приглашение от организации БЕЗ привязки к дневнику/карточке,
+          // ведём себя как поток «сиделка приглашает клиента» (простой флоу)
+          const orgPart = (validationResult.organization_client_invite_tokens && Array.isArray(validationResult.organization_client_invite_tokens))
+            ? validationResult.organization_client_invite_tokens[0]
+            : validationResult.organization_client_invite_tokens
+          const hasDirectDiary = !!orgPart?.diary_id
+          setFlowType(hasDirectDiary ? 'organization' : 'caregiver')
         } else if (detectedInviteType === 'caregiver_client') {
+          setFlowType('caregiver')
+        } else if (detectedInviteType === 'admin_static') {
+          // Явный клиент от админа (без привязок)
+          setIsAdminStatic(true)
           setFlowType('caregiver')
         }
 
@@ -174,7 +186,7 @@ export const ClientInviteRegisterPage = () => {
     }
 
     validateInvite()
-  }, [token]) // flowType теперь state, не нужно в зависимостях
+  }, [token, typeParam]) // flowType теперь state, не нужно в зависимостях
 
   const handleOrganizationSubmit = async (formData: ClientRegisterFormData) => {
     if (!token || !inviteData) return
@@ -189,15 +201,16 @@ export const ClientInviteRegisterPage = () => {
     }
 
     try {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), isAdminStatic ? 120000 : 45000)
       // Регистрация ТОЛЬКО через Edge Function accept-invite (как для сотрудников)
       // Edge Function создаст пользователя через admin API, обходя валидацию email
       
       // Используем прямой fetch для лучшей совместимости с CORS
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || ''
       const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
       
-      const baseUrl = supabaseUrl.replace(/\/$/, '')
-      const functionUrl = `${baseUrl}/functions/v1/accept-invite`
+      // Используем утилиту для получения правильного URL функций
+      const functionUrl = getFunctionUrl('accept-invite')
       
       console.log('ClientInviteRegisterPage: Calling Edge Function:', functionUrl)
       
@@ -208,14 +221,19 @@ export const ClientInviteRegisterPage = () => {
           'Authorization': `Bearer ${supabaseAnonKey}`,
           'apikey': supabaseAnonKey,
         },
+        signal: controller.signal,
+        mode: 'cors',
+        credentials: 'omit',
         body: JSON.stringify({
           token: token,
           password: formData.password,
           phone: phone,
           firstName: formData.firstName,
           lastName: formData.lastName,
+          // явный email не передаём; функция сама генерирует псевдо-email
         }),
       })
+      clearTimeout(timeoutId)
 
       if (!response.ok) {
         const errorText = await response.text()
@@ -232,19 +250,17 @@ export const ClientInviteRegisterPage = () => {
 
       const inviteResult = await response.json()
       
-      if (!inviteResult?.data?.session) {
-        throw new Error('Не удалось получить сессию после регистрации. Попробуйте войти вручную.')
+      // Выполняем вход локально по email, который вернула функция
+      if (!inviteResult?.data?.loginEmail) {
+        throw new Error('Не удалось получить данные для входа. Попробуйте войти вручную.')
       }
-
-      // Устанавливаем сессию в Supabase клиенте
-      const { error: sessionError } = await supabase.auth.setSession({
-        access_token: inviteResult.data.session.access_token,
-        refresh_token: inviteResult.data.session.refresh_token,
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: inviteResult.data.loginEmail,
+        password: formData.password,
       })
-      
-      if (sessionError) {
-        console.error('Ошибка установки сессии:', sessionError)
-        throw new Error('Не удалось установить сессию. Попробуйте войти вручную.')
+      if (signInError) {
+        console.error('Ошибка входа после регистрации:', signInError)
+        throw new Error('Не удалось войти после регистрации. Попробуйте войти вручную.')
       }
 
       // Получаем текущего пользователя и сессию
@@ -275,10 +291,18 @@ export const ClientInviteRegisterPage = () => {
       await new Promise(resolve => setTimeout(resolve, 200))
       
       // Для клиентов переходим сразу на dashboard (без экрана заполнения профиля)
-      navigate('/dashboard')
+      try {
+        navigate('/dashboard')
+      } catch {
+        window.location.href = '/dashboard'
+      }
     } catch (err: any) {
       console.error('Ошибка регистрации клиента организации', err)
-      setError(err.message || 'Не удалось завершить регистрацию. Попробуйте ещё раз.')
+      if (err?.name === 'AbortError') {
+        setError('Сервер не ответил вовремя. Попробуйте ещё раз.')
+      } else {
+        setError(err.message || 'Не удалось завершить регистрацию. Попробуйте ещё раз.')
+      }
       setStatus('form')
     }
   }
@@ -296,6 +320,8 @@ export const ClientInviteRegisterPage = () => {
     }
 
     try {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 30000)
       // Регистрация ТОЛЬКО через Edge Function accept-invite (как для сотрудников)
       // Edge Function создаст пользователя через admin API, обходя валидацию email
       
@@ -306,7 +332,10 @@ export const ClientInviteRegisterPage = () => {
       const baseUrl = supabaseUrl.replace(/\/$/, '')
       const functionUrl = `${baseUrl}/functions/v1/accept-invite`
       
-      console.log('ClientInviteRegisterPage: Calling Edge Function for caregiver:', functionUrl)
+      console.log(
+        `ClientInviteRegisterPage: Calling Edge Function for ${isAdminStatic ? 'admin' : 'caregiver'}:`,
+        functionUrl
+      )
       
       const response = await fetch(functionUrl, {
         method: 'POST',
@@ -315,6 +344,9 @@ export const ClientInviteRegisterPage = () => {
           'Authorization': `Bearer ${supabaseAnonKey}`,
           'apikey': supabaseAnonKey,
         },
+        signal: controller.signal,
+        mode: 'cors',
+        credentials: 'omit',
         body: JSON.stringify({
           token: token,
           password: formData.password,
@@ -323,6 +355,7 @@ export const ClientInviteRegisterPage = () => {
           lastName: formData.lastName,
         }),
       })
+      clearTimeout(timeoutId)
 
       if (!response.ok) {
         const errorText = await response.text()
@@ -339,19 +372,17 @@ export const ClientInviteRegisterPage = () => {
 
       const inviteResult = await response.json()
       
-      if (!inviteResult?.data?.session) {
-        throw new Error('Не удалось получить сессию после регистрации. Попробуйте войти вручную.')
+      // Выполняем вход локально по email, который вернула функция
+      if (!inviteResult?.data?.loginEmail) {
+        throw new Error('Не удалось получить данные для входа. Попробуйте войти вручную.')
       }
-
-      // Устанавливаем сессию в Supabase клиенте
-      const { error: sessionError } = await supabase.auth.setSession({
-        access_token: inviteResult.data.session.access_token,
-        refresh_token: inviteResult.data.session.refresh_token,
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: inviteResult.data.loginEmail,
+        password: formData.password,
       })
-      
-      if (sessionError) {
-        console.error('Ошибка установки сессии:', sessionError)
-        throw new Error('Не удалось установить сессию. Попробуйте войти вручную.')
+      if (signInError) {
+        console.error('Ошибка входа после регистрации:', signInError)
+        throw new Error('Не удалось войти после регистрации. Попробуйте войти вручную.')
       }
 
       // Получаем текущего пользователя и сессию
@@ -382,10 +413,18 @@ export const ClientInviteRegisterPage = () => {
       await new Promise(resolve => setTimeout(resolve, 200))
       
       // Для клиентов переходим сразу на dashboard (без экрана заполнения профиля)
-      navigate('/dashboard')
+      try {
+        navigate('/dashboard')
+      } catch {
+        window.location.href = '/dashboard'
+      }
     } catch (err: any) {
       console.error('Ошибка регистрации клиента сиделки', err)
-      setError(err.message || 'Не удалось завершить регистрацию. Попробуйте ещё раз.')
+      if (err?.name === 'AbortError') {
+        setError('Сервер не ответил вовремя. Попробуйте ещё раз.')
+      } else {
+        setError(err.message || 'Не удалось завершить регистрацию. Попробуйте ещё раз.')
+      }
       setStatus('form')
     }
   }

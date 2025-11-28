@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
-// import { supabase } from '@/lib/supabase'
+import { useMemo, useState, useEffect } from 'react'
+import { supabase } from '@/lib/supabase'
 import { Button } from '@/components/ui'
-import { ensureEmployeeInviteTokens, upsertEmployeeInviteToken } from '@/utils/inviteStorage'
+import { getFunctionUrl } from '@/utils/supabaseConfig'
 
 type InviteType = 'organization' | 'employee' | 'client' | 'privateCaregiver'
 
@@ -24,28 +24,44 @@ const buildInviteLink = (type: InviteType, token: string) => {
 
 interface BaseInvite {
   id: string
-  role?: string | null
+  token: string
   created_at: string
   link: string
+  used_at?: string | null
+  used_by?: string | null
+  status: 'active' | 'used' | 'expired' | 'revoked'
 }
 
 interface OrganizationInvite extends BaseInvite {
   source: 'supabase'
-  token: string
-  organization_id: string
-  status: 'active' | 'used' | 'expired'
+  invite_type: 'organization'
+  organization_type?: 'pension' | 'patronage_agency' | null
+  invited_email?: string | null
+  invited_name?: string | null
 }
 
-interface LocalInvite extends BaseInvite {
-  source: 'local'
-  token: string
-  owner_id: string
-  used_at?: string | null
-  used_by?: string | null
-  type: InviteType
+interface PrivateCaregiverInvite extends BaseInvite {
+  source: 'supabase'
+  invite_type: 'private_caregiver'
+  invited_email?: string | null
+  invited_name?: string | null
 }
 
-type CombinedInvite = OrganizationInvite | LocalInvite
+interface EmployeeInvite extends BaseInvite {
+  source: 'supabase'
+  invite_type: 'organization_employee'
+  organization_id?: string | null
+  employee_role?: string | null
+}
+
+interface ClientInvite extends BaseInvite {
+  source: 'supabase'
+  invite_type: 'organization_client' | 'caregiver_client'
+  organization_id?: string | null
+  caregiver_id?: string | null
+}
+
+type CombinedInvite = OrganizationInvite | PrivateCaregiverInvite | EmployeeInvite | ClientInvite
 
 const inviteTypeOptions: { value: InviteType; label: string }[] = [
   { value: 'organization', label: 'Организация' },
@@ -68,187 +84,224 @@ const getInviteTypeLabel = (type: InviteType) => {
   }
 }
 
+const mapInviteTypeToDbType = (
+  type: InviteType
+): 'organization' | 'private_caregiver' | 'organization_client' | 'caregiver_client' | 'admin_static' => {
+  if (type === 'organization') return 'organization'
+  if (type === 'privateCaregiver') return 'private_caregiver'
+  if (type === 'client') return 'admin_static' // Явный клиент без привязки
+  throw new Error(`Неподдерживаемый тип для админской панели: ${type}`)
+}
+
 export const AdminInvitesPage = () => {
   const [selectedType, setSelectedType] = useState<InviteType>('organization')
   const [isGenerating, setIsGenerating] = useState(false)
   const [generatedLink, setGeneratedLink] = useState<string | null>(null)
-
   const [filterType, setFilterType] = useState<'all' | InviteType>('all')
-  // const [searchQuery, setSearchQuery] = useState('')
+  const [invites, setInvites] = useState<CombinedInvite[]>([])
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const organizationInvites = useMemo<OrganizationInvite[]>(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem('admin_supabase_invites') || '[]')
-      if (!Array.isArray(stored)) return []
-      return stored.map((item: any) => {
-        const token = item.token
-        const link = item.link || buildInviteLink('organization', token)
-        return {
-          id: item.id || token || crypto.randomUUID(),
-          source: 'supabase' as const,
-          token,
-          organization_id: item.organization_id || '—',
-          created_at: item.created_at || item.createdAt || new Date().toISOString(),
-          status: item.used_at || item.usedAt ? 'used' : 'active',
-          link,
+  // Загрузка приглашений из Supabase
+  // Автоматическое обновление списка приглашений каждые 30 секунд
+  useEffect(() => {
+    const loadInvites = async () => {
+      setIsLoading(true)
+      setError(null)
+
+      try {
+        // Загружаем все приглашения
+        const { data: inviteTokens, error: inviteError } = await supabase
+          .from('invite_tokens')
+          .select(`
+            id,
+            token,
+            invite_type,
+            created_at,
+            used_at,
+            used_by,
+            revoked_at,
+            expires_at,
+            organization_registration_invite_tokens (
+              organization_type,
+              invited_email,
+              invited_name
+            ),
+            private_caregiver_registration_invite_tokens (
+              invited_email,
+              invited_name
+            ),
+            organization_invite_tokens (
+              organization_id,
+              employee_role
+            ),
+            organization_client_invite_tokens (
+              organization_id
+            ),
+            caregiver_client_invite_tokens (
+              caregiver_id
+            )
+          `)
+          .order('created_at', { ascending: false })
+
+        if (inviteError) {
+          console.error('Ошибка загрузки приглашений:', inviteError)
+          setError('Не удалось загрузить приглашения')
+          return
         }
-      })
-    } catch (error) {
-      console.warn('Не удалось загрузить supabase-инвайты из localStorage', error)
-      return []
-    }
-  }, [])
 
-  const localInvites = useMemo<LocalInvite[]>(() => {
-    const result: LocalInvite[] = []
+        if (!inviteTokens) {
+          setInvites([])
+          return
+        }
 
-    try {
-      const tokens = ensureEmployeeInviteTokens()
-      result.push(
-        ...tokens.map(token => {
-          const inviteToken = token.token
-          return {
-            id: token.id || inviteToken || crypto.randomUUID(),
-            source: 'local' as const,
-            token: inviteToken,
-            owner_id: token.organization_id || '—',
-            role: token.role || null,
-            created_at: token.created_at || new Date().toISOString(),
-            used_at: token.used_at || null,
-            used_by: token.used_by || null,
-            type: 'employee' as InviteType,
-            link: token.link || buildInviteLink('employee', inviteToken),
+        // Преобразуем данные в формат CombinedInvite
+        const mappedInvites: CombinedInvite[] = inviteTokens.map((invite: any) => {
+          // Проверяем статус: сначала revoked, потом used, потом expired, потом active
+          const isRevoked = !!invite.revoked_at
+          const isUsed = !!invite.used_at
+          const isExpired = invite.expires_at ? new Date(invite.expires_at) < new Date() : false
+          
+          const status = isRevoked
+            ? 'revoked'
+            : isUsed
+            ? 'used'
+            : isExpired
+            ? 'expired'
+            : 'active'
+
+          const link = buildInviteLink(
+            invite.invite_type === 'organization'
+              ? 'organization'
+              : invite.invite_type === 'private_caregiver'
+              ? 'privateCaregiver'
+              : invite.invite_type === 'organization_employee'
+              ? 'employee'
+              : 'client',
+            invite.token
+          )
+
+          if (invite.invite_type === 'organization') {
+            const orgData = Array.isArray(invite.organization_registration_invite_tokens)
+              ? invite.organization_registration_invite_tokens[0]
+              : invite.organization_registration_invite_tokens
+
+            return {
+              id: invite.id,
+              token: invite.token,
+              created_at: invite.created_at,
+              link,
+              used_at: invite.used_at,
+              used_by: invite.used_by,
+              status,
+              source: 'supabase',
+              invite_type: 'organization',
+              organization_type: orgData?.organization_type || null,
+              invited_email: orgData?.invited_email || null,
+              invited_name: orgData?.invited_name || null,
+            } as OrganizationInvite
           }
+
+          if (invite.invite_type === 'private_caregiver') {
+            const caregiverData = Array.isArray(invite.private_caregiver_registration_invite_tokens)
+              ? invite.private_caregiver_registration_invite_tokens[0]
+              : invite.private_caregiver_registration_invite_tokens
+
+            return {
+              id: invite.id,
+              token: invite.token,
+              created_at: invite.created_at,
+              link,
+              used_at: invite.used_at,
+              used_by: invite.used_by,
+              status,
+              source: 'supabase',
+              invite_type: 'private_caregiver',
+              invited_email: caregiverData?.invited_email || null,
+              invited_name: caregiverData?.invited_name || null,
+            } as PrivateCaregiverInvite
+          }
+
+          if (invite.invite_type === 'organization_employee') {
+            const empData = Array.isArray(invite.organization_invite_tokens)
+              ? invite.organization_invite_tokens[0]
+              : invite.organization_invite_tokens
+
+            return {
+              id: invite.id,
+              token: invite.token,
+              created_at: invite.created_at,
+              link,
+              used_at: invite.used_at,
+              used_by: invite.used_by,
+              status,
+              source: 'supabase',
+              invite_type: 'organization_employee',
+              organization_id: empData?.organization_id || null,
+              employee_role: empData?.employee_role || null,
+            } as EmployeeInvite
+          }
+
+          // organization_client или caregiver_client
+          const clientData =
+            invite.organization_client_invite_tokens ||
+            invite.caregiver_client_invite_tokens ||
+            {}
+
+          return {
+            id: invite.id,
+            token: invite.token,
+            created_at: invite.created_at,
+            link,
+            used_at: invite.used_at,
+            used_by: invite.used_by,
+            status,
+            source: 'supabase',
+            invite_type: invite.invite_type as 'organization_client' | 'caregiver_client',
+            organization_id: clientData.organization_id || null,
+            caregiver_id: clientData.caregiver_id || null,
+          } as ClientInvite
         })
-      )
-    } catch (error) {
-      console.warn('Не удалось обработать local_invite_tokens', error)
-    }
 
-    try {
-      const caregiverTokensRaw = localStorage.getItem('caregiver_client_invite_tokens')
-      if (caregiverTokensRaw) {
-        const tokens = JSON.parse(caregiverTokensRaw)
-        if (Array.isArray(tokens)) {
-          result.push(
-            ...tokens.map((token: any) => {
-              const inviteToken = token.token
-              return {
-                id: token.id || inviteToken || crypto.randomUUID(),
-                source: 'local' as const,
-                token: inviteToken,
-                owner_id: token.caregiver_id || '—',
-                created_at: token.created_at || new Date().toISOString(),
-                used_at: token.used_at || null,
-                used_by: token.used_by || null,
-                role: 'caregiver_client',
-                type: 'client' as InviteType,
-                link: token.link || buildInviteLink('client', inviteToken),
-              }
-            })
-          )
-        }
+        setInvites(mappedInvites)
+      } catch (err) {
+        console.error('Ошибка при загрузке приглашений:', err)
+        setError('Произошла ошибка при загрузке данных')
+      } finally {
+        setIsLoading(false)
       }
-    } catch (error) {
-      console.warn('Не удалось обработать caregiver_client_invite_tokens', error)
     }
 
-    try {
-      const diaryLinksRaw = localStorage.getItem('diary_client_links')
-      if (diaryLinksRaw) {
-        const diaryLinks = JSON.parse(diaryLinksRaw)
-        if (diaryLinks && typeof diaryLinks === 'object') {
-          Object.keys(diaryLinks).forEach(diaryId => {
-            const link = diaryLinks[diaryId]
-            if (!link) return
-            const token = link.token || '—'
-            const directLink = link.direct_link || link.link || link.url || link.finalLink
-            result.push({
-              id: token || diaryId,
-              source: 'local' as const,
-              token,
-              owner_id: link.organization_id || link.caregiver_id || '—',
-              created_at: link.created_at || new Date().toISOString(),
-              used_at: link.accepted_at || null,
-              used_by: link.accepted_by || null,
-              role: 'organization_client',
-              type: 'client',
-              link: directLink || buildInviteLink('client', token),
-            })
-          })
-        }
-      }
-    } catch (error) {
-      console.warn('Не удалось обработать diary_client_links', error)
-    }
-
-    try {
-      const privateCaregiverTokensRaw = localStorage.getItem('private_caregiver_invite_tokens')
-      if (privateCaregiverTokensRaw) {
-        const tokens = JSON.parse(privateCaregiverTokensRaw)
-        if (Array.isArray(tokens)) {
-          result.push(
-            ...tokens.map((token: any) => {
-              const inviteToken = token.token
-              return {
-                id: token.id || inviteToken || crypto.randomUUID(),
-                source: 'local' as const,
-                token: inviteToken,
-                owner_id: token.created_by || '—',
-                created_at: token.created_at || new Date().toISOString(),
-                used_at: token.used_at || null,
-                used_by: token.used_by || null,
-                role: 'private_caregiver_invite',
-                type: 'privateCaregiver' as InviteType,
-                link: token.link || buildInviteLink('privateCaregiver', inviteToken),
-              }
-            })
-          )
-        }
-      }
-    } catch (error) {
-      console.warn('Не удалось обработать private_caregiver_invite_tokens', error)
-    }
-
-    return result
+    loadInvites()
+    
+    // Автоматическое обновление каждые 30 секунд
+    const interval = setInterval(() => {
+      loadInvites()
+    }, 30000)
+    
+    return () => clearInterval(interval)
   }, [])
-
-  const combinedInvites = useMemo<CombinedInvite[]>(() => {
-    const combined = [...organizationInvites, ...localInvites]
-    return combined.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-  }, [organizationInvites, localInvites])
 
   const filteredInvites = useMemo(() => {
-    return combinedInvites.filter(invite => {
-      if (filterType !== 'all') {
-        const inviteType =
-          invite.source === 'supabase'
-            ? 'organization'
-            : invite.type
-        if (inviteType !== filterType) {
-          return false
-        }
-      }
+    return invites.filter(invite => {
+      if (filterType === 'all') return true
 
-      // if (!searchQuery.trim()) {
-      //   return true
-      // }
-      //
-      // const query = searchQuery.trim().toLowerCase()
-      // return (
-      //   invite.token.toLowerCase().includes(query) ||
-      //   (invite.source === 'supabase'
-      //     ? invite.organization_id.toLowerCase().includes(query)
-      //     : invite.owner_id.toLowerCase().includes(query)) ||
-      //   (invite.role || '').toLowerCase().includes(query)
-      // )
-      return true
+      const inviteType =
+        invite.invite_type === 'organization'
+          ? 'organization'
+          : invite.invite_type === 'private_caregiver'
+          ? 'privateCaregiver'
+          : invite.invite_type === 'organization_employee'
+          ? 'employee'
+          : 'client'
+
+      return inviteType === filterType
     })
-  }, [combinedInvites, filterType])
+  }, [invites, filterType])
 
   const stats = useMemo(() => {
     const base = {
-      total: combinedInvites.length,
+      total: invites.length,
       active: 0,
       used: 0,
       byType: {
@@ -259,88 +312,136 @@ export const AdminInvitesPage = () => {
       } as Record<InviteType, number>,
     }
 
-    combinedInvites.forEach(invite => {
+    invites.forEach(invite => {
       const type: InviteType =
-        invite.source === 'supabase'
+        invite.invite_type === 'organization'
           ? 'organization'
-          : invite.type
+          : invite.invite_type === 'private_caregiver'
+          ? 'privateCaregiver'
+          : invite.invite_type === 'organization_employee'
+          ? 'employee'
+          : 'client'
 
       base.byType[type] = (base.byType[type] || 0) + 1
 
-      const isActive =
-        invite.source === 'supabase'
-          ? invite.status !== 'used'
-          : !invite.used_at
-      if (isActive) {
+      if (invite.status === 'active') {
         base.active += 1
-      } else {
+      } else if (invite.status === 'used') {
         base.used += 1
       }
     })
 
     return base
-  }, [combinedInvites])
+  }, [invites])
 
   const handleGenerate = async () => {
     setIsGenerating(true)
     setGeneratedLink(null)
+    setError(null)
 
     try {
-      const token = crypto.randomUUID()
-      const link = buildInviteLink(selectedType, token)
-
-      if (selectedType === 'organization') {
-        setTimeout(() => {
-          const existing = JSON.parse(localStorage.getItem('admin_supabase_invites') || '[]')
-          const next = [
-            {
-              id: token,
-              token,
-              organization_id: '—',
-              created_at: new Date().toISOString(),
-              status: 'active',
-              link,
-            },
-            ...existing,
-          ]
-          localStorage.setItem('admin_supabase_invites', JSON.stringify(next))
-        }, 50)
-      } else {
-        const storageKey =
-          selectedType === 'employee'
-            ? 'local_invite_tokens'
-            : selectedType === 'client'
-            ? 'caregiver_client_invite_tokens'
-            : 'private_caregiver_invite_tokens'
-        const nextRecord: Record<string, any> = {
-          id: token,
-          token,
-          created_at: new Date().toISOString(),
-          used_at: null,
-          used_by: null,
-          link,
-        }
-        if (selectedType === 'employee') {
-          nextRecord.organization_id = '—'
-        }
-        if (selectedType === 'client') {
-          nextRecord.caregiver_id = '—'
-        }
-        if (selectedType === 'privateCaregiver') {
-          nextRecord.created_by = '—'
-        }
-        if (selectedType === 'employee') {
-          upsertEmployeeInviteToken({ ...nextRecord, token: nextRecord.id })
-        } else {
-          const existing = JSON.parse(localStorage.getItem(storageKey) || '[]')
-          const next = [nextRecord, ...existing]
-          localStorage.setItem(storageKey, JSON.stringify(next))
-        }
+      const dbType = mapInviteTypeToDbType(selectedType)
+      const payload: any = {
+        expires_in_hours: 168, // 7 дней
       }
 
+      if (selectedType === 'organization') {
+        // Для организаций нужно указать тип (pension или patronage_agency)
+        // Пока используем pension по умолчанию, можно добавить выбор в UI
+        payload.organization_type = 'pension'
+      } else if (selectedType === 'client') {
+        // Для клиентов можно указать опциональные данные
+        // organization_id и patient_card_id не обязательны для админских приглашений
+        payload.organization_id = null
+        payload.patient_card_id = null
+        payload.diary_id = null
+      }
+
+      // Используем Edge Function для создания приглашения
+      // Получаем админский токен из localStorage
+      const adminToken = localStorage.getItem('admin_panel_token')
+      if (!adminToken) {
+        setError('Не найден админский токен. Обновите страницу с токеном в URL.')
+        return
+      }
+
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+      
+      if (!supabaseAnonKey) {
+        setError('Не настроен VITE_SUPABASE_ANON_KEY. Проверьте переменные окружения.')
+        return
+      }
+      
+      // Используем утилиту для получения правильного URL функций
+      const functionUrl = getFunctionUrl('create-admin-invite')
+      
+      const response = await fetch(functionUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseAnonKey}`,
+          'apikey': supabaseAnonKey,
+        },
+        body: JSON.stringify({
+          invite_type: dbType,
+          admin_token: adminToken,
+          ...payload,
+        }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Неизвестная ошибка' }))
+        console.error('Ошибка создания приглашения:', errorData)
+        setError(errorData.error || 'Не удалось создать приглашение')
+        return
+      }
+
+      const result = await response.json()
+
+      if (!result.success || !result.invite) {
+        setError('Не удалось создать приглашение')
+        return
+      }
+
+      const link = result.link || buildInviteLink(selectedType, result.invite.token)
       setGeneratedLink(link)
-    } catch (error) {
-      console.error('Не удалось сгенерировать токен', error)
+
+      // Перезагружаем список приглашений
+      const { data: inviteTokens } = await supabase
+        .from('invite_tokens')
+        .select('*')
+        .eq('id', result.invite.id)
+        .single()
+
+      if (inviteTokens) {
+        // Обновляем список приглашений
+        // Определяем статус правильно
+        const isUsed = !!result.invite.used_at
+        const isExpired = result.invite.expires_at ? new Date(result.invite.expires_at) < new Date() : false
+        const status = isUsed ? 'used' : isExpired ? 'expired' : 'active'
+        
+        const newInvite: CombinedInvite = {
+          id: result.invite.id,
+          token: result.invite.token,
+          created_at: result.invite.created_at,
+          link,
+          used_at: result.invite.used_at,
+          used_by: result.invite.used_by,
+          status,
+          source: 'supabase',
+          invite_type: dbType,
+          ...(selectedType === 'organization'
+            ? { organization_type: 'pension' as const }
+            : selectedType === 'privateCaregiver'
+            ? { invited_email: null, invited_name: null }
+            : {}),
+        } as CombinedInvite
+
+        setInvites(prev => [newInvite, ...prev])
+      }
+    } catch (err) {
+      console.error('Ошибка при создании приглашения:', err)
+      setError('Произошла ошибка при создании приглашения')
     } finally {
       setIsGenerating(false)
     }
@@ -352,11 +453,55 @@ export const AdminInvitesPage = () => {
     })
   }
 
+  const handleRevoke = async (inviteId: string) => {
+    try {
+      setError(null)
+      const adminToken = localStorage.getItem('admin_panel_token')
+      if (!adminToken) {
+        setError('Не найден админский токен. Обновите страницу с токеном в URL.')
+        return
+      }
+      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+      
+      // Используем утилиту для получения правильного URL функций
+      const functionUrl = getFunctionUrl('admin-revoke-invite')
+
+      const response = await fetch(functionUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseAnonKey}`,
+          'apikey': supabaseAnonKey,
+        },
+        body: JSON.stringify({ invite_id: inviteId, admin_token: adminToken }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Неизвестная ошибка' }))
+        console.error('Ошибка отзыва приглашения:', errorData)
+        setError(errorData.error || 'Не удалось отозвать приглашение')
+        return
+      }
+
+      // Удаляем приглашение из списка (оно удалено из БД каскадно)
+      setInvites(prev => prev.filter(invite => invite.id !== inviteId))
+    } catch (err) {
+      console.error('Ошибка при отзыве приглашения:', err)
+      setError('Произошла ошибка при отзыве приглашения')
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="space-y-2">
         <h2 className="text-2xl font-bold text-gray-800">Управление пригласительными ссылками</h2>
       </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4">
+          <p className="text-red-800 text-sm">{error}</p>
+        </div>
+      )}
 
       <div className="bg-white border border-gray-200 rounded-3xl p-6 space-y-6 shadow-sm">
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -391,19 +536,26 @@ export const AdminInvitesPage = () => {
           </div>
 
           <div className="flex flex-wrap gap-3">
-            {inviteTypeOptions.map(option => (
-              <button
-                key={option.value}
-                onClick={() => setSelectedType(option.value)}
-                className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${
-                  selectedType === option.value
-                    ? 'bg-[#55ACBF]/10 text-[#0A6D83] border-[#55ACBF]'
-                    : 'text-gray-600 border-gray-200 hover:border-[#55ACBF]/50 hover:text-[#0A6D83]'
-                }`}
-              >
-                {option.label}
-              </button>
-            ))}
+            {inviteTypeOptions
+              .filter(
+                option =>
+                  option.value === 'organization' ||
+                  option.value === 'privateCaregiver' ||
+                  option.value === 'client'
+              )
+              .map(option => (
+                <button
+                  key={option.value}
+                  onClick={() => setSelectedType(option.value)}
+                  className={`px-4 py-2 rounded-full text-sm font-medium border transition-colors ${
+                    selectedType === option.value
+                      ? 'bg-[#55ACBF]/10 text-[#0A6D83] border-[#55ACBF]'
+                      : 'text-gray-600 border-gray-200 hover:border-[#55ACBF]/50 hover:text-[#0A6D83]'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
           </div>
 
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 w-full">
@@ -423,8 +575,173 @@ export const AdminInvitesPage = () => {
 
         <section className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
-            <div>
-              <h3 className="text-lg font-semibold text-gray-800">Список приглашений</h3>
+            <div className="flex items-center gap-3">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-800">Список приглашений</h3>
+                {isLoading && <p className="text-sm text-gray-500 mt-1">Загрузка...</p>}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  setIsLoading(true)
+                  setError(null)
+                  try {
+                    const { data: inviteTokens, error: inviteError } = await supabase
+                      .from('invite_tokens')
+                      .select(`
+                        *,
+                        organization_registration_invite_tokens (
+                          organization_type,
+                          invited_email,
+                          invited_name
+                        ),
+                        private_caregiver_registration_invite_tokens (
+                          invited_email,
+                          invited_name
+                        ),
+                        organization_invite_tokens (
+                          organization_id,
+                          employee_role
+                        ),
+                        organization_client_invite_tokens (
+                          organization_id
+                        ),
+                        caregiver_client_invite_tokens (
+                          caregiver_id
+                        )
+                      `)
+                      .order('created_at', { ascending: false })
+
+                    if (inviteError) {
+                      console.error('Ошибка загрузки приглашений:', inviteError)
+                      setError('Не удалось загрузить приглашения')
+                      return
+                    }
+
+                    if (!inviteTokens) {
+                      setInvites([])
+                      return
+                    }
+
+                    const mappedInvites: CombinedInvite[] = inviteTokens.map((invite: any) => {
+                      const isRevoked = !!invite.revoked_at
+                      const isUsed = !!invite.used_at
+                      const isExpired = invite.expires_at ? new Date(invite.expires_at) < new Date() : false
+                      
+                      const status = isRevoked
+                        ? 'revoked'
+                        : isUsed
+                        ? 'used'
+                        : isExpired
+                        ? 'expired'
+                        : 'active'
+
+                      const link = buildInviteLink(
+                        invite.invite_type === 'organization'
+                          ? 'organization'
+                          : invite.invite_type === 'private_caregiver'
+                          ? 'privateCaregiver'
+                          : invite.invite_type === 'organization_employee'
+                          ? 'employee'
+                          : 'client',
+                        invite.token
+                      )
+
+                      if (invite.invite_type === 'organization') {
+                        const orgData = Array.isArray(invite.organization_registration_invite_tokens)
+                          ? invite.organization_registration_invite_tokens[0]
+                          : invite.organization_registration_invite_tokens
+
+                        return {
+                          id: invite.id,
+                          token: invite.token,
+                          created_at: invite.created_at,
+                          link,
+                          used_at: invite.used_at,
+                          used_by: invite.used_by,
+                          status,
+                          source: 'supabase',
+                          invite_type: 'organization',
+                          organization_type: orgData?.organization_type || null,
+                          invited_email: orgData?.invited_email || null,
+                          invited_name: orgData?.invited_name || null,
+                        } as OrganizationInvite
+                      }
+
+                      if (invite.invite_type === 'private_caregiver') {
+                        const caregiverData = Array.isArray(invite.private_caregiver_registration_invite_tokens)
+                          ? invite.private_caregiver_registration_invite_tokens[0]
+                          : invite.private_caregiver_registration_invite_tokens
+
+                        return {
+                          id: invite.id,
+                          token: invite.token,
+                          created_at: invite.created_at,
+                          link,
+                          used_at: invite.used_at,
+                          used_by: invite.used_by,
+                          status,
+                          source: 'supabase',
+                          invite_type: 'private_caregiver',
+                          invited_email: caregiverData?.invited_email || null,
+                          invited_name: caregiverData?.invited_name || null,
+                        } as PrivateCaregiverInvite
+                      }
+
+                      if (invite.invite_type === 'organization_employee') {
+                        const empData = Array.isArray(invite.organization_invite_tokens)
+                          ? invite.organization_invite_tokens[0]
+                          : invite.organization_invite_tokens
+
+                        return {
+                          id: invite.id,
+                          token: invite.token,
+                          created_at: invite.created_at,
+                          link,
+                          used_at: invite.used_at,
+                          used_by: invite.used_by,
+                          status,
+                          source: 'supabase',
+                          invite_type: 'organization_employee',
+                          organization_id: empData?.organization_id || null,
+                          employee_role: empData?.employee_role || null,
+                        } as EmployeeInvite
+                      }
+
+                      // Клиентские приглашения
+                      const _clientData = Array.isArray(invite.organization_client_invite_tokens)
+                        ? invite.organization_client_invite_tokens[0]
+                        : invite.organization_client_invite_tokens ||
+                          (Array.isArray(invite.caregiver_client_invite_tokens)
+                            ? invite.caregiver_client_invite_tokens[0]
+                            : invite.caregiver_client_invite_tokens)
+                      void _clientData // Prevent unused variable warning
+
+                      return {
+                        id: invite.id,
+                        token: invite.token,
+                        created_at: invite.created_at,
+                        link,
+                        used_at: invite.used_at,
+                        used_by: invite.used_by,
+                        status,
+                        source: 'supabase',
+                        invite_type: invite.invite_type === 'organization_client' ? 'organization_client' : 'caregiver_client',
+                      } as ClientInvite
+                    })
+
+                    setInvites(mappedInvites)
+                  } catch (err) {
+                    console.error('Ошибка при загрузке приглашений:', err)
+                    setError('Произошла ошибка при загрузке приглашений')
+                  } finally {
+                    setIsLoading(false)
+                  }
+                }}
+              >
+                Обновить
+              </Button>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs font-medium">
               {(['all', ...inviteTypeOptions.map(option => option.value)] as const).map(option => (
@@ -445,216 +762,184 @@ export const AdminInvitesPage = () => {
             </div>
           </div>
 
-          <div className="overflow-hidden border border-gray-200 rounded-2xl overflow-x-auto hidden lg:block">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead className="bg-[#F7FCFD] text-gray-500 uppercase tracking-wide text-xs">
-                <tr>
-                  <th className="px-4 py-3 text-left">Тип</th>
-                  <th className="px-4 py-3 text-left">Источник</th>
-                  <th className="px-4 py-3 text-left">Ссылка</th>
-                  <th className="px-4 py-3 text-left">Владелец</th>
-                  <th className="px-4 py-3 text-left">Статус</th>
-                  <th className="px-4 py-3 text-left">Создан</th>
-                  <th className="px-4 py-3 text-left">Действия</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100 bg-white">
-                {filteredInvites.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-10 text-center text-sm text-gray-500">
-                      Ссылки не найдены. После подключения Supabase и API появится полный CRUD.
-                    </td>
-                  </tr>
-                ) : (
-                  filteredInvites.map(invite => {
-                    const typeLabel =
-                      invite.source === 'supabase'
-                        ? 'Организация'
-                        : invite.type === 'employee'
-                        ? 'Сотрудник'
-                        : invite.type === 'client'
-                        ? 'Клиент'
-                        : 'Частная сиделка'
+          {isLoading ? (
+            <div className="text-center py-10 text-gray-500">Загрузка приглашений...</div>
+          ) : filteredInvites.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-6 text-sm text-gray-500 text-center">
+              Приглашения не найдены
+            </div>
+          ) : (
+            <>
+              <div className="overflow-hidden border border-gray-200 rounded-2xl overflow-x-auto hidden lg:block">
+                <table className="min-w-full divide-y divide-gray-200 text-sm">
+                  <thead className="bg-[#F7FCFD] text-gray-500 uppercase tracking-wide text-xs">
+                    <tr>
+                      <th className="px-4 py-3 text-left">Тип</th>
+                      <th className="px-4 py-3 text-left">Ссылка</th>
+                      <th className="px-4 py-3 text-left">Статус</th>
+                      <th className="px-4 py-3 text-left">Создан</th>
+                      <th className="px-4 py-3 text-left">Действия</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 bg-white">
+                    {filteredInvites.map(invite => {
+                      const typeLabel =
+                        invite.invite_type === 'organization'
+                          ? 'Организация'
+                          : invite.invite_type === 'private_caregiver'
+                          ? 'Частная сиделка'
+                          : invite.invite_type === 'organization_employee'
+                          ? 'Сотрудник'
+                          : 'Клиент'
 
-                    const statusLabel =
-                      invite.source === 'supabase'
-                        ? invite.status === 'used'
+                      const statusLabel =
+                        invite.status === 'active'
+                          ? 'Активна'
+                          : invite.status === 'used'
                           ? 'Использована'
-                          : 'Активна'
-                        : invite.used_at
-                        ? 'Использована'
-                        : 'Активна'
+                          : invite.status === 'revoked'
+                          ? 'Отозвана'
+                          : 'Истекла'
 
-                    const owner =
-                      invite.source === 'supabase' ? invite.organization_id : invite.owner_id || '—'
-
-                    return (
-                      <tr key={`${invite.source}-${invite.id}`}>
-                        <td className="px-4 py-3 text-gray-800">{typeLabel}</td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={`inline-flex items-center gap-2 text-xs font-medium px-2 py-1 rounded-full ${
-                              invite.source === 'supabase'
-                                ? 'bg-[#55ACBF]/10 text-[#0A6D83]'
-                                : 'bg-[#F1F5F9] text-gray-600'
-                            }`}
-                          >
+                      return (
+                        <tr key={invite.id}>
+                          <td className="px-4 py-3 text-gray-800">{typeLabel}</td>
+                          <td className="px-4 py-3 text-gray-700">
+                            <a
+                              href={invite.link}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[#0A6D83] underline hover:text-[#55ACBF] break-all"
+                            >
+                              {invite.link}
+                            </a>
+                          </td>
+                          <td className="px-4 py-3">
                             <span
-                              className={`w-2 h-2 rounded-full ${
-                                invite.source === 'supabase' ? 'bg-[#0A6D83]' : 'bg-gray-500'
+                              className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${
+                                invite.status === 'active'
+                                  ? 'bg-green-100 text-green-700'
+                                  : invite.status === 'used'
+                                  ? 'bg-gray-200 text-gray-600'
+                                  : invite.status === 'revoked'
+                                  ? 'bg-red-100 text-red-700'
+                                  : 'bg-yellow-100 text-yellow-700'
                               }`}
-                            ></span>
-                            {invite.source === 'supabase' ? 'Supabase' : 'Local'}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-gray-700">
-                          <a
-                            href={invite.link}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-[#0A6D83] underline hover:text-[#55ACBF] break-all"
-                          >
-                            {invite.link}
-                          </a>
-                        </td>
-                        <td className="px-4 py-3 text-gray-700">{owner}</td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${
-                              statusLabel === 'Активна'
-                                ? 'bg-green-100 text-green-700'
-                                : 'bg-gray-200 text-gray-600'
-                            }`}
-                          >
-                            {statusLabel}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-gray-500">
-                          {new Date(invite.created_at).toLocaleString('ru-RU', {
-                            day: '2-digit',
-                            month: '2-digit',
-                            year: 'numeric',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex flex-wrap gap-2">
-                            <Button variant="outline" size="sm" onClick={() => handleCopy(invite.link)}>
-                              Скопировать
-                            </Button>
-                            <Button variant="outline" size="sm" disabled>
-                              Отключить
-                            </Button>
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-          <div className="lg:hidden space-y-3">
-            {filteredInvites.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-gray-300 bg-white p-6 text-sm text-gray-500 text-center">
-                Ссылки не найдены. После подключения Supabase и API появится полный CRUD.
+                            >
+                              {statusLabel}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-gray-500">
+                            {new Date(invite.created_at).toLocaleString('ru-RU', {
+                              day: '2-digit',
+                              month: '2-digit',
+                              year: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex flex-wrap gap-2">
+                              <Button variant="outline" size="sm" onClick={() => handleCopy(invite.link)}>
+                                Скопировать
+                              </Button>
+                              {invite.status === 'active' && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => handleRevoke(invite.id)}
+                                  className="text-red-600 border-red-300 hover:bg-red-50"
+                                >
+                                  Отозвать
+                                </Button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
               </div>
-            ) : (
-              filteredInvites.map(invite => {
-                const typeLabel =
-                  invite.source === 'supabase'
-                    ? 'Организация'
-                    : invite.type === 'employee'
-                    ? 'Сотрудник'
-                    : invite.type === 'client'
-                    ? 'Клиент'
-                    : 'Частная сиделка'
+              <div className="lg:hidden space-y-3">
+                {filteredInvites.map(invite => {
+                  const typeLabel =
+                    invite.invite_type === 'organization'
+                      ? 'Организация'
+                      : invite.invite_type === 'private_caregiver'
+                      ? 'Частная сиделка'
+                      : invite.invite_type === 'organization_employee'
+                      ? 'Сотрудник'
+                      : 'Клиент'
 
-                const statusLabel =
-                  invite.source === 'supabase'
-                    ? invite.status === 'used'
+                  const statusLabel =
+                    invite.status === 'active'
+                      ? 'Активна'
+                      : invite.status === 'used'
                       ? 'Использована'
-                      : 'Активна'
-                    : invite.used_at
-                    ? 'Использована'
-                    : 'Активна'
+                      : invite.status === 'revoked'
+                      ? 'Отозвана'
+                      : 'Истекла'
 
-                const owner = invite.source === 'supabase' ? invite.organization_id : invite.owner_id || '—'
-
-                return (
-                  <div
-                    key={`${invite.source}-${invite.id}-card`}
-                    className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm flex flex-col gap-3"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-[#F7FCFD] text-[#0A6D83] border border-[#55ACBF]/40">
-                        {typeLabel}
-                      </span>
-                      <span
-                        className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold ${
-                          statusLabel === 'Активна' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'
-                        }`}
-                      >
-                        {statusLabel}
-                      </span>
-                    </div>
-                    <div className="space-y-2 text-sm text-gray-700">
-                      <p className="font-semibold text-gray-800 break-all">{owner}</p>
-                      <p className="text-xs text-gray-400">
-                        Создана: {new Date(invite.created_at).toLocaleString('ru-RU')}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                  return (
+                    <div
+                      key={invite.id}
+                      className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm flex flex-col gap-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-[#F7FCFD] text-[#0A6D83] border border-[#55ACBF]/40">
+                          {typeLabel}
+                        </span>
                         <span
-                          className={`inline-flex items-center gap-2 px-2 py-1 rounded-full ${
-                            invite.source === 'supabase'
-                              ? 'bg-[#55ACBF]/10 text-[#0A6D83]'
-                              : 'bg-[#F1F5F9] text-gray-600'
+                          className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-semibold ${
+                            invite.status === 'active'
+                              ? 'bg-green-100 text-green-700'
+                              : invite.status === 'used'
+                              ? 'bg-gray-100 text-gray-500'
+                              : invite.status === 'revoked'
+                              ? 'bg-red-100 text-red-700'
+                              : 'bg-yellow-100 text-yellow-700'
                           }`}
                         >
-                          <span
-                            className={`w-2 h-2 rounded-full ${
-                              invite.source === 'supabase' ? 'bg-[#0A6D83]' : 'bg-gray-500'
-                            }`}
-                          ></span>
-                          {invite.source === 'supabase' ? 'Supabase' : 'Local'}
+                          {statusLabel}
                         </span>
-                        <span className="text-xs text-gray-500 break-all">Токен: {invite.token}</span>
                       </div>
-                      <a
-                        href={invite.link}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-[#0A6D83] underline hover:text-[#55ACBF] break-all text-sm"
-                      >
-                        {invite.link}
-                      </a>
+                      <div className="space-y-2 text-sm text-gray-700">
+                        <p className="text-xs text-gray-400">
+                          Создана: {new Date(invite.created_at).toLocaleString('ru-RU')}
+                        </p>
+                        <a
+                          href={invite.link}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[#0A6D83] underline hover:text-[#55ACBF] break-all text-sm"
+                        >
+                          {invite.link}
+                        </a>
+                      </div>
+                      <div className="flex flex-col gap-2 text-sm">
+                        <Button variant="outline" size="sm" onClick={() => handleCopy(invite.link)}>
+                          Скопировать ссылку
+                        </Button>
+                        {invite.status === 'active' && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => handleRevoke(invite.id)}
+                            className="text-red-600 border-red-300 hover:bg-red-50"
+                          >
+                            Отозвать
+                          </Button>
+                        )}
+                      </div>
                     </div>
-                    <div className="flex flex-col gap-2 text-sm">
-                      <Button variant="outline" size="sm" onClick={() => handleCopy(invite.link)}>
-                        Скопировать ссылку
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent(invite.link)}`, '_blank')}
-                      >
-                        Отправить в WhatsApp
-                      </Button>
-                    </div>
-                  </div>
-                )
-              })
-            )}
-          </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
         </section>
-      </div>
-
-      <div className="text-xs text-gray-400 text-right">
-        Шаг 12.2 — интерфейс управления приглашениями готов, осталось интегрировать реальные операции (12.3+)
       </div>
     </div>
   )
 }
-
-
-

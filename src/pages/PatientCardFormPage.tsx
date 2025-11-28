@@ -6,6 +6,7 @@ import { z } from 'zod'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
 import { Button, Input } from '@/components/ui'
+import { canEditDiariesAndCards } from '@/utils/employeePermissions'
 
 const GENDERS = ['male', 'female'] as const
 const MOBILITY_OPTIONS = ['walks', 'sits', 'lies'] as const
@@ -71,39 +72,34 @@ export const PatientCardFormPage = () => {
   const isClientUser = resolvedUserRole === 'client'
   const isPension = resolvedOrganizationType === 'pension'
 
+  const [canEditValue, setCanEditValue] = useState(false)
+  const [_isCheckingPermissions, setIsCheckingPermissions] = useState(true)
+  void _isCheckingPermissions // Prevent unused variable warning
+
   // Проверка прав доступа
-  const canEdit = () => {
-    if (isViewMode) {
-      console.log('PatientCardFormPage: canEdit = false (view mode)')
-      return false
-    }
-    
-    if (resolvedUserRole === 'client') {
-      console.log('PatientCardFormPage: canEdit = true (client)')
-      return true
-    }
-    
-    if (resolvedOrganizationType === 'pension' || resolvedOrganizationType === 'patronage_agency') {
-      console.log('PatientCardFormPage: canEdit = true (organization)')
-      return true
-    }
-    
-    if (resolvedOrganizationType === 'caregiver') {
-      console.log('PatientCardFormPage: canEdit = false (caregiver)')
-      return false
-    }
-    
-    if (resolvedUserRole === 'org_employee') {
-      console.log('PatientCardFormPage: canEdit = false (org_employee)')
-      return false
+  useEffect(() => {
+    const checkPermissions = async () => {
+      if (isViewMode) {
+        setCanEditValue(false)
+        setIsCheckingPermissions(false)
+        return
+      }
+
+      try {
+        const hasPermission = await canEditDiariesAndCards(user)
+        setCanEditValue(hasPermission)
+      } catch (error) {
+        console.error('Ошибка проверки прав доступа:', error)
+        setCanEditValue(false)
+      } finally {
+        setIsCheckingPermissions(false)
+      }
     }
 
-    console.log('PatientCardFormPage: canEdit = false (default)', {
-      resolvedUserRole,
-      resolvedOrganizationType,
-    })
-    return false
-  }
+    checkPermissions()
+  }, [user, isViewMode])
+
+  const canEdit = () => canEditValue
 
   const {
     register,
@@ -403,6 +399,26 @@ const sanitizeFormValues = (values: Partial<PatientCardFormData>): PatientCardFo
       return
     }
 
+    // Автоматически сохраняем пользовательские значения, если они введены, но не добавлены
+    if (customDiagnosis.trim() && !selectedDiagnoses.includes(customDiagnosis.trim())) {
+      handleAddCustomDiagnosis()
+    }
+    if (customService.trim() && !selectedServices.includes(customService.trim())) {
+      handleAddCustomService()
+    }
+    if (customWish.trim() && !serviceWishes.includes(customWish.trim())) {
+      handleAddCustomWish()
+    }
+    
+    // Используем актуальные значения из state (после handleAddCustom* они обновятся)
+    // Небольшая задержка для обновления состояния
+    await new Promise(resolve => setTimeout(resolve, 100))
+    
+    // Обновляем data актуальными значениями из state
+    data.diagnoses = watch('diagnoses') as string[]
+    data.services = watch('services') as string[]
+    data.service_wishes = watch('service_wishes') as string[]
+
     try {
       // Получаем client_id
       let clientId: string | null = null
@@ -541,6 +557,18 @@ const sanitizeFormValues = (values: Partial<PatientCardFormData>): PatientCardFo
     const isCurrentlyOpen = expandedSection === section
 
     if (isCurrentlyOpen) {
+      // Автоматически сохраняем пользовательские значения перед закрытием секции
+      if (section === 'diagnoses' && customDiagnosis.trim() && !selectedDiagnoses.includes(customDiagnosis.trim())) {
+        handleAddCustomDiagnosis()
+      }
+      if (section === 'services') {
+        if (customService.trim() && !selectedServices.includes(customService.trim())) {
+          handleAddCustomService()
+        }
+        if (customWish.trim() && !serviceWishes.includes(customWish.trim())) {
+          handleAddCustomWish()
+        }
+      }
       persistCurrentValues()
       setExpandedSection(null)
     } else {
@@ -828,7 +856,7 @@ const sanitizeFormValues = (values: Partial<PatientCardFormData>): PatientCardFo
                     <Button
                     type="button"
                       onClick={handleAddCustomDiagnosis}
-                      className="!bg-[#A0D9E3] !text-[#4A4A4A] !px-6"
+                      className="!bg-[#A0D9E3] !text-[#4A4A4A] !px-8 !py-3 !text-2xl !font-bold !min-w-[60px]"
                   >
                     +
                     </Button>
@@ -983,7 +1011,7 @@ const sanitizeFormValues = (values: Partial<PatientCardFormData>): PatientCardFo
                       <Button
                     type="button"
                         onClick={handleAddCustomService}
-                        className="!bg-[#A0D9E3] !text-[#4A4A4A] !px-6"
+                        className="!bg-[#A0D9E3] !text-[#4A4A4A] !px-8 !py-3 !text-2xl !font-bold !min-w-[60px]"
                   >
                     +
                       </Button>
@@ -999,7 +1027,7 @@ const sanitizeFormValues = (values: Partial<PatientCardFormData>): PatientCardFo
                       <Button
                     type="button"
                         onClick={handleAddCustomWish}
-                        className="!bg-[#A0D9E3] !text-[#4A4A4A] !px-6"
+                        className="!bg-[#A0D9E3] !text-[#4A4A4A] !px-8 !py-3 !text-2xl !font-bold !min-w-[60px]"
                   >
                     +
                       </Button>

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '@/lib/supabase'
 import { useAuthStore } from '@/store/authStore'
+import { canCreateDiariesAndCards, canEditDiariesAndCards } from '@/utils/employeePermissions'
 
 interface PatientCard {
   id: string
@@ -86,44 +87,34 @@ export const PatientCardsPage = () => {
     loadPatientCards()
   }, [user, navigate])
 
-  const canCreateCard = () => {
-    const _userRole = user?.user_metadata?.role || user?.user_metadata?.user_role
-    const _organizationType = user?.user_metadata?.organization_type
+  const [canCreateCardValue, setCanCreateCardValue] = useState(false)
+  const [canEditCardValue, setCanEditCardValue] = useState(false)
 
-    // Сотрудники организаций НЕ могут создавать карточки
-    if (_userRole === 'org_employee') return false
+  useEffect(() => {
+    const checkPermissions = async () => {
+      if (!user) {
+        setCanCreateCardValue(false)
+        setCanEditCardValue(false)
+        return
+      }
+      try {
+        const [canCreate, canEdit] = await Promise.all([
+          canCreateDiariesAndCards(user),
+          canEditDiariesAndCards(user),
+        ])
+        setCanCreateCardValue(canCreate)
+        setCanEditCardValue(canEdit)
+      } catch (error) {
+        console.error('Ошибка проверки прав доступа:', error)
+        setCanCreateCardValue(false)
+        setCanEditCardValue(false)
+      }
+    }
+    checkPermissions()
+  }, [user])
 
-    // Клиенты могут создавать карточки
-    if (_userRole === 'client') return true
-
-    // Организации могут создавать карточки
-    if (_organizationType === 'pension' || _organizationType === 'patronage_agency') return true
-
-    // Частные сиделки НЕ могут создавать карточки
-    if (_organizationType === 'caregiver') return false
-
-    // Сотрудники организаций НЕ могут создавать карточки
-    return false
-  }
-
-  const canEditCard = () => {
-    const _userRole = user?.user_metadata?.role || user?.user_metadata?.user_role
-    const _organizationType = user?.user_metadata?.organization_type
-
-    // Клиенты могут редактировать карточки
-    if (_userRole === 'client') return true
-
-    // Организации могут редактировать карточки
-    if (_organizationType === 'pension' || _organizationType === 'patronage_agency') return true
-
-    // Частные сиделки НЕ могут редактировать карточки
-    if (_organizationType === 'caregiver') return false
-
-    // Сотрудники организаций НЕ могут редактировать карточки
-    if (_userRole === 'org_employee') return false
-
-    return false
-  }
+  const canCreateCard = () => canCreateCardValue
+  const canEditCard = () => canEditCardValue
 
   const calculateAge = (dateOfBirth: string | null) => {
     if (!dateOfBirth) return null
