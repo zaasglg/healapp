@@ -93,7 +93,7 @@ interface ClientProfile {
   [key: string]: any
 }
 
-type DiaryTab = 'diary' | 'history' | 'client' | 'share'
+type DiaryTab = 'diary' | 'history' | 'route' | 'client' | 'share'
 
 const MINUTES_IN_DAY = 24 * 60
 
@@ -337,6 +337,14 @@ const metricModalConfigs: Record<string, MetricModalConfig> = {
     min: 5,
     max: 60,
   },
+  pulse: {
+    variant: 'numeric',
+    description: 'Укажите частоту пульса.',
+    unit: 'уд/мин',
+    min: 20,
+    max: 220,
+    step: 1,
+  },
   pain_level: {
     variant: 'pain',
     description: 'Оцените уровень боли по шкале от 0 до 10 и опишите, что беспокоит.',
@@ -383,7 +391,6 @@ const CARE_METRIC_OPTIONS = [
   { value: 'meal', label: 'Прием пищи' },
   { value: 'medications', label: 'Прием лекарств' },
   { value: 'vitamins', label: 'Прием витаминов' },
-  { value: 'sleep', label: 'Сон' },
 ]
 
 const PHYSICAL_METRIC_OPTIONS = [
@@ -393,6 +400,9 @@ const PHYSICAL_METRIC_OPTIONS = [
   { value: 'pain_level', label: 'Уровень боли' },
   { value: 'saturation', label: 'Сатурация' },
   { value: 'blood_sugar', label: 'Уровень сахара в крови' },
+    { value: 'urination', label: 'Выпито/выделено и цвет мочи' },
+  { value: 'defecation', label: 'Дефекация' },
+  { value: 'pulse', label: 'Пульс' },
 ]
 
 const EXCRETION_METRIC_OPTIONS = [
@@ -653,6 +663,25 @@ const MetricValueModal = ({ isOpen, metricType, metricLabel, onClose, onSave }: 
             })}
           </div>
         )}
+
+        {/* ROUTE_PICKER_MODAL_DIARYPAGE */}
+        
+
+        
+
+        
+
+        
+
+        
+
+        
+
+        
+
+        
+
+        
 
         {config.variant === 'numeric' && (
           <div className="space-y-3">
@@ -966,6 +995,208 @@ export const DiaryPage = () => {
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({})
   const [panelMetric, setPanelMetric] = useState<string | null>(null)
   const [panelVisible, setPanelVisible] = useState(false)
+  const [isRoutePickerOpen, setIsRoutePickerOpen] = useState(false)
+  const [selectedManipulations, setSelectedManipulations] = useState<string[]>([])
+
+  const toggleManipulation = (key: string) => {
+    setSelectedManipulations(prev => (prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]))
+  }
+  const [careMetricOptionsState, setCareMetricOptions] = useState(() => CARE_METRIC_OPTIONS)
+  const originalCareMetricValuesRef = useRef(new Set(CARE_METRIC_OPTIONS.map(o => o.value)))
+  const [customMetricInput, setCustomMetricInput] = useState<string>('')
+  
+  const [physicalMetricOptionsState, setPhysicalMetricOptions] = useState(() => PHYSICAL_METRIC_OPTIONS)
+  const originalPhysicalMetricValuesRef = useRef(new Set(PHYSICAL_METRIC_OPTIONS.map(o => o.value)))
+  const [customPhysicalInput, setCustomPhysicalInput] = useState<string>('')
+
+  const handleAddPhysicalMetric = () => {
+    const label = customPhysicalInput.trim()
+    if (!label) return
+    const value = createValueFromLabel(label)
+    setPhysicalMetricOptions(prev => {
+      if (prev.some(o => o.value === value)) {
+        const uniqueValue = `${value}_${Date.now().toString(36)}`
+        return [...prev, { value: uniqueValue, label }]
+      }
+      return [...prev, { value, label }]
+    })
+    setSelectedManipulations(prev => (prev.includes(value) ? prev : [...prev, value]))
+    setCustomPhysicalInput('')
+  }
+
+  const handlePhysicalInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleAddPhysicalMetric()
+    }
+  }
+
+  const createValueFromLabel = (label: string) => {
+    // create a readable slug, allow Cyrillic letters too
+    let slug = label
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, '_')
+      // allow Latin a-z, digits, underscore and Cyrillic range
+      .replace(/[^\w\u0400-\u04FF0-9_]/g, '')
+      .slice(0, 60)
+    if (!slug) {
+      slug = `custom_${Date.now().toString(36)}`
+    }
+    return slug
+  }
+
+  const handleAddCustomMetric = () => {
+    const label = customMetricInput.trim()
+    if (!label) return
+    const value = createValueFromLabel(label)
+    // avoid duplicates by value
+    setCareMetricOptions(prev => {
+      if (prev.some(o => o.value === value)) {
+        // already exists - append suffix to make unique
+        const uniqueValue = `${value}_${Date.now().toString(36)}`
+        return [...prev, { value: uniqueValue, label }]
+      }
+      return [...prev, { value, label }]
+    })
+    setSelectedManipulations(prev => (prev.includes(value) ? prev : [...prev, value]))
+    setCustomMetricInput('')
+  }
+
+  const handleCustomInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleAddCustomMetric()
+    }
+  }
+
+  const removeCareOption = (value: string) => {
+    // don't remove original built-in options
+    if (originalCareMetricValuesRef.current.has(value)) return
+    setCareMetricOptions(prev => prev.filter(o => o.value !== value))
+    setSelectedManipulations(prev => prev.filter(v => v !== value))
+  }
+
+  const removePhysicalOption = (value: string) => {
+    if (originalPhysicalMetricValuesRef.current.has(value)) return
+    setPhysicalMetricOptions(prev => prev.filter(o => o.value !== value))
+    setSelectedManipulations(prev => prev.filter(v => v !== value))
+  }
+  // Route manipulation configuration modal state
+  const [isRouteManipulationConfigOpen, setIsRouteManipulationConfigOpen] = useState(false)
+  const [manipulationToConfigure, setManipulationToConfigure] = useState<string | null>(null)
+  const [routeSchedules, setRouteSchedules] = useState<Record<string, { days: number[]; times: string[] }>>({})
+
+  const handleSaveRouteManipulation = (metric: string, payload: { days: number[]; times: string[] }) => {
+    setRouteSchedules(prev => ({ ...prev, [metric]: payload }))
+    console.log('[DiaryPage] route schedule saved:', metric, payload)
+  }
+
+  // Inline modal component for configuring a selected manipulation (days + times)
+  const RouteManipulationModal = ({
+    isOpen,
+    metric,
+    onClose,
+    onSave,
+  }: {
+    isOpen: boolean
+    metric: string | null
+    onClose: () => void
+    onSave: (metric: string, payload: { days: number[]; times: string[] }) => void
+  }) => {
+    const [daysState, setDaysState] = useState<boolean[]>([false, false, false, false, false, false, false])
+    const [timesState, setTimesState] = useState<string[]>([])
+    const [newTime, setNewTime] = useState('07:00')
+
+    useEffect(() => {
+      if (!isOpen || !metric) return
+      const existing = routeSchedules[metric] || { days: [], times: [] }
+      const daysArr = [false, false, false, false, false, false, false]
+      ;(existing.days || []).forEach((d: number) => {
+        if (d >= 0 && d < 7) daysArr[d] = true
+      })
+      setDaysState(daysArr)
+      setTimesState(existing.times || [])
+      setNewTime('07:00')
+    }, [isOpen, metric])
+
+    if (!isOpen || !metric) return null
+
+    const toggleDay = (idx: number) => {
+      setDaysState(prev => {
+        const copy = [...prev]
+        copy[idx] = !copy[idx]
+        return copy
+      })
+    }
+
+    const addTime = () => {
+      if (!newTime) return
+      if (!timesState.includes(newTime)) setTimesState(prev => [...prev, newTime])
+      setNewTime('07:00')
+    }
+
+    const removeTime = (t: string) => setTimesState(prev => prev.filter(x => x !== t))
+
+    const doSave = () => {
+      const selectedDays = daysState.map((v, i) => (v ? i : -1)).filter(i => i !== -1)
+      onSave(metric, { days: selectedDays, times: timesState })
+      onClose()
+    }
+
+    const dayLabels = ['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС']
+
+    return (
+      <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/40 px-4">
+        <div className="w-full max-w-sm rounded-[28px] bg-white p-6 space-y-4">
+          <div className="text-center">
+            <h2 className="text-2xl font-bold text-[#25ADB8]">Настройте манипуляцию</h2>
+            <div className="text-xl font-semibold mt-1">{getMetricLabel(metric)}</div>
+          </div>
+
+          <div>
+            <div className="flex flex-wrap gap-2 justify-center">
+              {dayLabels.map((lbl, i) => (
+                <button
+                  key={lbl}
+                  type="button"
+                  onClick={() => toggleDay(i)}
+                  className={`px-3 py-2 rounded-2xl text-sm font-semibold ${daysState[i] ? 'bg-[#CFF6F8] text-[#0A6D83] shadow-md' : 'bg-white border border-gray-200 text-[#4A4A4A]'}`}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="flex flex-wrap gap-2 mb-2">
+              {timesState.map(t => (
+                <div key={t} className="inline-flex items-center gap-2 bg-gray-100 rounded-full px-3 py-2">
+                  <span className="text-sm font-medium">{t}</span>
+                  <button onClick={() => removeTime(t)} className="text-xs text-red-500">×</button>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="time"
+                value={newTime}
+                onChange={e => setNewTime(e.target.value)}
+                className="flex-1 rounded-xl border border-gray-200 px-3 py-2"
+              />
+              <button onClick={addTime} className="w-12 h-12 rounded-xl bg-[#2AA6B1] text-white">+</button>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3 justify-center pt-2">
+            <button onClick={doSave} className="px-6 py-3 rounded-2xl bg-[#55ACBF] text-white font-semibold">Сохранить</button>
+            <button onClick={onClose} className="px-6 py-3 rounded-2xl bg-gray-200 text-[#4A4A4A] font-semibold">Отмена</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
   const [caregiverOrganizationId, setCaregiverOrganizationId] = useState<string | null>(null)
   const [animatingPinnedMetric, setAnimatingPinnedMetric] = useState<{ type: string; index: number; direction: 'toPanel' | 'fromPanel' } | null>(null)
   const [panelOriginIndex, setPanelOriginIndex] = useState<number | null>(null)
@@ -3103,6 +3334,7 @@ export const DiaryPage = () => {
       // Физические
       temperature: 'Температура',
       blood_pressure: 'Давление',
+  pulse: 'Пульс',
       breathing_rate: 'Частота дыхания',
       pain_level: 'Уровень боли',
       saturation: 'Сатурация',
@@ -3340,6 +3572,7 @@ export const DiaryPage = () => {
     const base: Array<{ id: DiaryTab; label: string }> = [
       { id: 'diary', label: 'Дневник' },
       { id: 'history', label: 'История' },
+      { id: 'route', label: 'Маршрутный лист' },
     ]
 
     if (isOrganization || (isOrgEmployee && employeePermissions.canManageClientAccess)) {
@@ -3401,12 +3634,12 @@ export const DiaryPage = () => {
   const baseMetricValues = useMemo(
     () =>
       new Set([
-        ...CARE_METRIC_OPTIONS.map(option => option.value),
+        ...careMetricOptionsState.map(option => option.value),
         ...PHYSICAL_METRIC_OPTIONS.map(option => option.value),
         ...EXCRETION_METRIC_OPTIONS.map(option => option.value),
         ...SYMPTOM_METRIC_OPTIONS.map(option => option.value),
       ]),
-    []
+    [careMetricOptionsState]
   )
 
   const customDraftMetrics = useMemo(
@@ -5123,6 +5356,185 @@ export const DiaryPage = () => {
           </div>
         )}
 
+        {activeTab === 'route' && (
+          <div className="space-y-6">
+            {/* Информационная карточка */}
+            <div className="bg-white rounded-[20px] shadow-[0_12px_30px_rgba(9,109,131,0.06)] px-6 py-5">
+              <p className="text-sm text-[#4A4A4A] leading-relaxed">
+                Маршрутный лист показывает, какие манипуляции нужно выполнять с подопечным, когда и с какой периодичностью
+                (ежедневно, раз в неделю). Можно составить вручную или воспользоваться ИИ, который предложит готовый вариант
+                на основе дневника динамики ухода. С маршрутным листом легко согласовать, изменить и отслеживать выполнение всех процедур.
+              </p>
+            </div>
+
+            {/* Заголовок секции */}
+            <h2 className="text-2xl font-bold text-gray-dark">Настроить маршрутный лист</h2>
+
+            {/* Панель добавления маршрутов */}
+            <div className="bg-white rounded-2xl shadow-sm p-6">
+              <p className="text-base text-gray-700 mb-6">Добавьте манипуляции вручную или с помощью ИИ</p>
+
+              <div className="flex flex-col items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsRoutePickerOpen(true)}
+                  className="px-6 py-2 rounded-full bg-[#4A4A4A] text-white text-sm font-semibold shadow-sm hover:opacity-90"
+                >
+                  Добавить
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsRoutePickerOpen(true)}
+                  className="px-6 py-2 rounded-full bg-gradient-to-r from-[#0A6D83] to-[#2A9DB0] text-white text-sm font-semibold shadow-sm hover:opacity-90"
+                >
+                  Добавить с ИИ
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isRoutePickerOpen && (
+          <div className="fixed inset-0 z-50">
+            <div
+              className="absolute inset-0 bg-black/40"
+              onClick={() => setIsRoutePickerOpen(false)}
+            />
+
+            {/* Bottom sheet container */}
+            <div className="absolute left-0 right-0 bottom-0 mx-auto w-full max-w-3xl">
+              <div className="bg-white rounded-t-3xl shadow-lg p-4 pb-6 max-h-[80vh] overflow-auto transform transition-transform duration-200 ease-out">
+                {/* drag handle */}
+                <div className="w-12 h-1.5 bg-gray-300 rounded-full mx-auto mb-3" />
+
+                <div className="flex items-center justify-center mb-2 text-center relative">
+                  <h3 className="text-3xl font-black text-[#25ADB8]">Выбор манипуляций</h3>
+                  <button
+                    onClick={() => setIsRoutePickerOpen(false)}
+                    aria-label="Закрыть"
+                    className="text-2xl absolute right-0"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                <p className="text-sm text-gray-600 mb-4 text-center border-t border-gray-100 pt-4">Чтобы выбрать манипуляции, которые необходимо выполнять специалисту, выберите их, укажите дни, по которым нужно проводить а также порядок выполнения.</p>
+
+                <h3 className="text-2xl font-black text-[#4A4A4A] text-center mb-5">Манипуляции ухода</h3>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {careMetricOptionsState.map(o => (
+                    <div key={o.value} className="relative">
+                      <button
+                        onClick={() => toggleManipulation(o.value)}
+                        className={`w-full py-3 px-4 rounded-xl shadow-xl border border-[#25ACB7] text-sm font-medium text-center ${selectedManipulations.includes(o.value) ? 'bg-[#CFF6F8] border-[#0A6D83]' : 'bg-white border-gray-200'}`}
+                      >
+                        {o.label}
+                      </button>
+                      {!originalCareMetricValuesRef.current.has(o.value) && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); removeCareOption(o.value) }}
+                          aria-label={`Удалить ${o.label}`}
+                          className="absolute top-1 right-1 text-xs text-red-500 bg-white rounded-full w-6 h-6 flex items-center justify-center shadow-sm"
+                          title="Удалить"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-6 w-full flex items-center gap-3">
+                  <input
+                    value={customMetricInput}
+                    onChange={e => setCustomMetricInput(e.target.value)}
+                    onKeyDown={handleCustomInputKeyDown}
+                    className="flex-1 rounded-xl border border-gray-200 px-6 py-4 text-lg text-gray-700 bg-white shadow-inner"
+                    placeholder="Добавить показатель"
+                    aria-label="Добавить показатель"
+                  />
+                  <button
+                    onClick={handleAddCustomMetric}
+                    disabled={!customMetricInput.trim()}
+                    className={`w-12 h-12 rounded-xl text-white flex items-center justify-center ${customMetricInput.trim() ? 'bg-[#2AA6B1]' : 'bg-gray-300 cursor-not-allowed'} shadow-md`}
+                    aria-label="Добавить"
+                  >
+                    +
+                  </button>
+                </div>
+
+                <div className="mt-6">
+                  <h3 className="text-2xl font-black text-[#4A4A4A] text-center mb-5">Физические манипуляции</h3>
+
+                  <div className="grid grid-cols-2 gap-3 mb-4">
+                    {physicalMetricOptionsState.map(o => (
+                      <div key={o.value} className="relative">
+                        <button
+                          onClick={() => toggleManipulation(o.value)}
+                          className={`w-full py-3 px-4 rounded-xl shadow-xl border border-[#25ACB7] text-sm font-medium text-center ${selectedManipulations.includes(o.value) ? 'bg-[#CFF6F8] border-[#0A6D83]' : 'bg-white border-gray-200'}`}
+                        >
+                          {o.label}
+                        </button>
+                        {!originalPhysicalMetricValuesRef.current.has(o.value) && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); removePhysicalOption(o.value) }}
+                            aria-label={`Удалить ${o.label}`}
+                            className="absolute top-1 right-1 text-xs text-red-500 bg-white rounded-full w-6 h-6 flex items-center justify-center shadow-sm"
+                            title="Удалить"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-2 w-full flex items-center gap-3">
+                    <input
+                      value={customPhysicalInput}
+                      onChange={e => setCustomPhysicalInput(e.target.value)}
+                      onKeyDown={handlePhysicalInputKeyDown}
+                      className="flex-1 rounded-xl border border-gray-200 px-6 py-4 text-lg text-gray-700 bg-white shadow-inner"
+                      placeholder="Добавить показатель"
+                      aria-label="Добавить показатель"
+                    />
+                    <button
+                      onClick={handleAddPhysicalMetric}
+                      disabled={!customPhysicalInput.trim()}
+                      className={`w-12 h-12 rounded-xl text-white flex items-center justify-center ${customPhysicalInput.trim() ? 'bg-[#2AA6B1]' : 'bg-gray-300 cursor-not-allowed'} shadow-md`}
+                      aria-label="Добавить"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <div className="flex justify-center">
+                    <button
+                      onClick={() => {
+                        if (!selectedManipulations || selectedManipulations.length === 0) {
+                          alert('Выберите манипуляцию')
+                          return
+                        }
+                        const target = selectedManipulations[selectedManipulations.length - 1] || selectedManipulations[0]
+                        setManipulationToConfigure(target)
+                        setIsRoutePickerOpen(false)
+                        setIsRouteManipulationConfigOpen(true)
+                      }}
+                      className="px-20 py-4 rounded-2xl bg-[#55ACBF] text-white"
+                    >
+                      Выбрать
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'client' && (isOrganization || (isOrgEmployee && employeePermissions.canManageClientAccess)) && (
           <div className="space-y-5">
             {!organizationClientLink?.accepted_by && (
@@ -5581,19 +5993,31 @@ export const DiaryPage = () => {
                   <div>
                     <p className="text-sm font-semibold text-gray-dark">Показатели ухода</p>
                     <div className="space-y-2 mt-2">
-                      {CARE_METRIC_OPTIONS.map(option => {
+                      {careMetricOptionsState.map(option => {
                         const checked = metricsDraftSelected.includes(option.value)
                         return (
-                          <label key={option.value} className="flex items-center gap-3 text-sm text-gray-700">
-                            <input
-                              type="checkbox"
-                              className="w-4 h-4 accent-[#55ACBF]"
-                              checked={checked}
-                              onChange={() => handleMetricDraftToggle(option.value)}
-                              disabled={!canManageMetricsSettings}
-                            />
-                            {option.label}
-                          </label>
+                          <div key={option.value} className="flex items-center justify-between">
+                            <label className="flex items-center gap-3 text-sm text-gray-700">
+                              <input
+                                type="checkbox"
+                                className="w-4 h-4 accent-[#55ACBF]"
+                                checked={checked}
+                                onChange={() => handleMetricDraftToggle(option.value)}
+                                disabled={!canManageMetricsSettings}
+                              />
+                              {option.label}
+                            </label>
+                            {canManageMetricsSettings && !originalCareMetricValuesRef.current.has(option.value) && (
+                              <button
+                                onClick={() => removeCareOption(option.value)}
+                                className="text-red-500 text-sm px-2 py-1"
+                                aria-label={`Удалить ${option.label}`}
+                                title="Удалить"
+                              >
+                                🗑
+                              </button>
+                            )}
+                          </div>
                         )
                       })}
                     </div>
@@ -5787,6 +6211,16 @@ export const DiaryPage = () => {
             </button>
           </div>
         </div>
+      )}
+
+      {/* Route manipulation config modal */}
+      {isRouteManipulationConfigOpen && manipulationToConfigure && (
+        <RouteManipulationModal
+          isOpen={isRouteManipulationConfigOpen}
+          metric={manipulationToConfigure}
+          onClose={() => setIsRouteManipulationConfigOpen(false)}
+          onSave={handleSaveRouteManipulation}
+        />
       )}
 
       {/* Модальное окно для заполнения обычных показателей */}
