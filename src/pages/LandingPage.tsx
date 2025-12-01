@@ -18,7 +18,7 @@ export const LandingPage = () => {
         <div className="container mx-auto px-4 py-16 md:py-24 lg:py-32">
           <div className="max-w-4xl mx-auto text-center">
             <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold font-manrope mb-6 leading-tight">
-              Дневник подопечного
+              Дневник здоровья
             </h1>
             <p className="text-xl md:text-2xl font-sans mb-8 text-white/90 leading-relaxed">
               Отслеживай динамику здоровья и улучшай состояние родственника
@@ -117,7 +117,7 @@ export const LandingPage = () => {
             Для кого это?
           </h2>
           <p className="text-lg text-gray-700 font-sans text-center mb-12 max-w-2xl mx-auto">
-            Дневник подопечного подходит разным людям, которые заботятся о здоровье близких
+            Дневник здоровья подходит разным людям, которые заботятся о здоровье близких
           </p>
           
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-6xl mx-auto">
@@ -165,7 +165,7 @@ export const LandingPage = () => {
                 Для агентств и пансионатов
               </h3>
               <p className="text-gray-700 font-sans leading-relaxed text-center">
-                Нужен удобный инструмент для автоматизации процесса? Дневник подопечного позволит 
+                Нужен удобный инструмент для автоматизации процесса? Дневник здоровья позволит 
                 твоим клиентам не волноваться за своих родных — они всегда будут видеть актуальную информацию. 
                 Это повысит доверие и снизит количество звонков с вопросами.
               </p>
@@ -403,6 +403,20 @@ export const LandingPage = () => {
                 Связаться в WhatsApp
               </Button>
 
+              <a
+                href="https://t.me/povelmar"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="Связаться в Telegram"
+                title="Связаться в Telegram"
+                className="mt-4 w-full inline-flex items-center justify-center gap-3 text-white rounded-2xl px-4 py-1 text-sm font-semibold border-0 shadow-lg hover:shadow-xl bg-gradient-to-r from-[#00aaff] to-[#0077cc] hover:from-[#2faaff] hover:to-[#006fa0]"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="size-12 mr-2 flex-shrink-0" viewBox="0 0 32 32" fill="none" aria-hidden>
+                  <path d="M22.9866 10.2088C23.1112 9.40332 22.3454 8.76755 21.6292 9.082L7.36482 15.3448C6.85123 15.5703 6.8888 16.3483 7.42147 16.5179L10.3631 17.4547C10.9246 17.6335 11.5325 17.541 12.0228 17.2023L18.655 12.6203C18.855 12.4821 19.073 12.7665 18.9021 12.9426L14.1281 17.8646C13.665 18.3421 13.7569 19.1512 14.314 19.5005L19.659 22.8523C20.2585 23.2282 21.0297 22.8506 21.1418 22.1261L22.9866 10.2088Z" fill="currentColor" />
+                </svg>
+                <span>Связаться в Telegram</span>
+              </a>
+
               <p className="mt-6 text-sm text-gray-600 font-sans">
                 Нажав на кнопку, вы перейдёте в WhatsApp для связи с нами
               </p>
@@ -416,14 +430,14 @@ export const LandingPage = () => {
         <div className="container mx-auto px-4">
           <div className="max-w-4xl mx-auto text-center">
             <h3 className="text-2xl font-bold font-manrope mb-4">
-              Дневник подопечного
+              Дневник здоровья
             </h3>
             <p className="text-gray-300 font-sans mb-6">
               Простой способ следить за здоровьем близкого человека
             </p>
             <div className="mt-8 pt-8 border-t border-gray-600">
               <p className="text-sm text-gray-400 font-sans">
-                © {new Date().getFullYear()} Дневник подопечного. Все права защищены.
+                © {new Date().getFullYear()} Дневник здоровья. Все права защищены.
               </p>
             </div>
           </div>

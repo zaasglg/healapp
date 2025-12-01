@@ -18,7 +18,7 @@ export const Header = () => {
     <header className="bg-white border-b border-gray-200">
       <div className="max-w-md mx-auto px-4 py-3 flex items-center justify-center relative">
         <h1 className="text-lg font-bold text-gray-dark">
-          Дневник подопечного
+          Дневник здоровья
         </h1>
         {user && (
           <Link

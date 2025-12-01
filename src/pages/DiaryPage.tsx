@@ -1084,13 +1084,47 @@ export const DiaryPage = () => {
   }
   // Route manipulation configuration modal state
   const [isRouteManipulationConfigOpen, setIsRouteManipulationConfigOpen] = useState(false)
-  const [manipulationToConfigure, setManipulationToConfigure] = useState<string | null>(null)
-  const [routeSchedules, setRouteSchedules] = useState<Record<string, { days: number[]; times: string[] }>>({})
+  const [manipulationToConfigure, setManipulationToConfigure] = useState<string | string[] | null>(null)
+  const [routeSchedules, setRouteSchedules] = useState<Record<string, { days: number[]; times: { from: string; to: string }[] }>>({})
 
-  const handleSaveRouteManipulation = (metric: string, payload: { days: number[]; times: string[] }) => {
-    setRouteSchedules(prev => ({ ...prev, [metric]: payload }))
+  const handleSaveRouteManipulation = (metric: string, payload: { days: number[]; times: { from: string; to: string }[] }) => {
+    setRouteSchedules(prev => {
+      const next = { ...prev, [metric]: payload }
+      try {
+        localStorage.setItem('routeSchedules', JSON.stringify(next))
+      } catch (e) {
+        console.warn('[DiaryPage] Failed to persist routeSchedules to localStorage', e)
+      }
+      return next
+    })
     console.log('[DiaryPage] route schedule saved:', metric, payload)
   }
+
+  // Load persisted schedules from localStorage on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('routeSchedules')
+      if (!raw) return
+      const parsed = JSON.parse(raw)
+      if (!parsed || typeof parsed !== 'object') return
+      const normalized: Record<string, { days: number[]; times: { from: string; to: string }[] }> = {}
+      Object.entries(parsed).forEach(([k, v]: any) => {
+        const days = Array.isArray(v.days) ? v.days.filter((d: any) => typeof d === 'number') : []
+        const timesArr = Array.isArray(v.times) ? v.times : []
+        const times = timesArr.map((t: any) => {
+          if (!t) return { from: '07:00', to: '07:00' }
+          if (typeof t === 'string') return { from: t, to: t }
+          if (typeof t === 'object' && ('from' in t || 'to' in t)) return { from: t.from || '07:00', to: t.to || t.from || '07:00' }
+          return { from: '07:00', to: '07:00' }
+        })
+        normalized[k] = { days, times }
+      })
+      setRouteSchedules(normalized)
+      console.log('[DiaryPage] Loaded routeSchedules from localStorage', normalized)
+    } catch (e) {
+      console.warn('[DiaryPage] Failed to load routeSchedules from localStorage', e)
+    }
+  }, [])
 
   // Inline modal component for configuring a selected manipulation (days + times)
   const RouteManipulationModal = ({
@@ -1100,25 +1134,49 @@ export const DiaryPage = () => {
     onSave,
   }: {
     isOpen: boolean
-    metric: string | null
+    metric: string | string[] | null
     onClose: () => void
-    onSave: (metric: string, payload: { days: number[]; times: string[] }) => void
+    onSave: (metric: string, payload: { days: number[]; times: { from: string; to: string }[] }) => void
   }) => {
     const [daysState, setDaysState] = useState<boolean[]>([false, false, false, false, false, false, false])
-    const [timesState, setTimesState] = useState<string[]>([])
-    const [newTime, setNewTime] = useState('07:00')
+    const [rangesState, setRangesState] = useState<Array<{ from: string; to: string }>>([])
+    const [newFrom, setNewFrom] = useState('07:00')
+    const [newTo, setNewTo] = useState('07:00')
+    const [currentMetric, setCurrentMetric] = useState<string | null>(null)
+    const [applyToAll, setApplyToAll] = useState(false)
 
+    // When modal opens, set currentMetric to the first metric if array
     useEffect(() => {
       if (!isOpen || !metric) return
-      const existing = routeSchedules[metric] || { days: [], times: [] }
+      if (Array.isArray(metric)) {
+        setCurrentMetric(metric[0] || null)
+      } else {
+        setCurrentMetric(metric)
+      }
+      setApplyToAll(false)
+    }, [isOpen, metric])
+
+    // Prefill days/times when currentMetric changes
+    useEffect(() => {
+      if (!isOpen || !currentMetric) return
+      const existing = routeSchedules[currentMetric] || { days: [], times: [] }
       const daysArr = [false, false, false, false, false, false, false]
       ;(existing.days || []).forEach((d: number) => {
         if (d >= 0 && d < 7) daysArr[d] = true
       })
       setDaysState(daysArr)
-      setTimesState(existing.times || [])
-      setNewTime('07:00')
-    }, [isOpen, metric])
+      // existing.times may be array of strings (old) or array of ranges
+      const existingTimes = existing.times || []
+      const normalized: Array<{ from: string; to: string }> = (existingTimes as any).map((t: any) => {
+        if (!t) return { from: '07:00', to: '07:00' }
+        if (typeof t === 'string') return { from: t, to: t }
+        if (typeof t === 'object' && 'from' in t && 'to' in t) return { from: t.from || '07:00', to: t.to || t.from || '07:00' }
+        return { from: '07:00', to: '07:00' }
+      })
+      setRangesState(normalized)
+      setNewFrom('07:00')
+      setNewTo('07:00')
+    }, [isOpen, currentMetric])
 
     if (!isOpen || !metric) return null
 
@@ -1130,17 +1188,29 @@ export const DiaryPage = () => {
       })
     }
 
-    const addTime = () => {
-      if (!newTime) return
-      if (!timesState.includes(newTime)) setTimesState(prev => [...prev, newTime])
-      setNewTime('07:00')
+    const addRange = () => {
+      if (!newFrom || !newTo) return
+      // avoid duplicate exact ranges
+      const exists = rangesState.some(r => r.from === newFrom && r.to === newTo)
+      if (!exists) setRangesState(prev => [...prev, { from: newFrom, to: newTo }])
+      setNewFrom('07:00')
+      setNewTo('07:00')
     }
 
-    const removeTime = (t: string) => setTimesState(prev => prev.filter(x => x !== t))
+    const removeRange = (r: { from: string; to: string }) =>
+      setRangesState(prev => prev.filter(x => !(x.from === r.from && x.to === r.to)))
 
     const doSave = () => {
       const selectedDays = daysState.map((v, i) => (v ? i : -1)).filter(i => i !== -1)
-      onSave(metric, { days: selectedDays, times: timesState })
+      const payload = { days: selectedDays, times: rangesState }
+      if (Array.isArray(metric) && applyToAll) {
+        // Apply to all selected metrics
+        metric.forEach(m => onSave(m, payload))
+      } else if (Array.isArray(metric) && currentMetric) {
+        onSave(currentMetric, payload)
+      } else if (typeof metric === 'string') {
+        onSave(metric, payload)
+      }
       onClose()
     }
 
@@ -1151,7 +1221,24 @@ export const DiaryPage = () => {
         <div className="w-full max-w-sm rounded-[28px] bg-white p-6 space-y-4">
           <div className="text-center">
             <h2 className="text-2xl font-bold text-[#25ADB8]">Настройте манипуляцию</h2>
-            <div className="text-xl font-semibold mt-1">{getMetricLabel(metric)}</div>
+            <div className="text-xl font-semibold mt-1">
+              {Array.isArray(metric) ? (
+                <div className="flex flex-wrap gap-2 justify-center">
+                  {(metric as string[]).map(m => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setCurrentMetric(m)}
+                      className={`px-3 py-2 rounded-2xl text-sm font-semibold ${currentMetric === m ? 'bg-[#CFF6F8] text-[#0A6D83] shadow-md' : 'bg-white border border-gray-200 text-[#4A4A4A]'}`}
+                    >
+                      {getMetricLabel(m)}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                getMetricLabel(metric as string)
+              )}
+            </div>
           </div>
 
           <div>
@@ -1171,23 +1258,38 @@ export const DiaryPage = () => {
 
           <div>
             <div className="flex flex-wrap gap-2 mb-2">
-              {timesState.map(t => (
-                <div key={t} className="inline-flex items-center gap-2 bg-gray-100 rounded-full px-3 py-2">
-                  <span className="text-sm font-medium">{t}</span>
-                  <button onClick={() => removeTime(t)} className="text-xs text-red-500">×</button>
+              {rangesState.map(r => (
+                <div key={`${r.from}_${r.to}`} className="inline-flex items-center gap-2 bg-gray-100 rounded-full px-3 py-2">
+                  <span className="text-sm font-medium">{r.from}{r.from !== r.to ? ` — ${r.to}` : ''}</span>
+                  <button onClick={() => removeRange(r)} className="text-xs text-red-500">×</button>
                 </div>
               ))}
             </div>
             <div className="flex items-center gap-2">
               <input
                 type="time"
-                value={newTime}
-                onChange={e => setNewTime(e.target.value)}
-                className="flex-1 rounded-xl border border-gray-200 px-3 py-2"
+                value={newFrom}
+                onChange={e => setNewFrom(e.target.value)}
+                className="rounded-xl border border-gray-200 px-3 py-2"
               />
-              <button onClick={addTime} className="w-12 h-12 rounded-xl bg-[#2AA6B1] text-white">+</button>
+              <span className="text-gray-400">—</span>
+              <input
+                type="time"
+                value={newTo}
+                onChange={e => setNewTo(e.target.value)}
+                className="rounded-xl border border-gray-200 px-3 py-2"
+              />
+              <button onClick={addRange} className="w-12 h-12 rounded-xl bg-[#2AA6B1] text-white">+</button>
             </div>
           </div>
+        {Array.isArray(metric) && (
+          <div className="flex items-center justify-center gap-3 pt-2">
+            <label className="inline-flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={applyToAll} onChange={e => setApplyToAll(e.target.checked)} />
+              <span>Применить ко всем выбранным</span>
+            </label>
+          </div>
+        )}
 
           <div className="flex items-center gap-3 justify-center pt-2">
             <button onClick={doSave} className="px-6 py-3 rounded-2xl bg-[#55ACBF] text-white font-semibold">Сохранить</button>
@@ -1223,6 +1325,92 @@ export const DiaryPage = () => {
   const [settingsSection, setSettingsSection] = useState<'card' | 'metrics' | 'access'>('card')
   const windowWidth = useWindowWidth()
   const isSmallScreen = windowWidth < 388
+
+  const getMetricLabel = (metricType: string): string => {
+    // Проверяем, является ли это пользовательским показателем
+    // Если да, пытаемся получить label из metadata метрики
+    if (metricType.startsWith('custom_')) {
+      const metric = metrics.find(m => m.metric_type === metricType)
+      if (metric) {
+        const metadata = (metric as any).metadata || {}
+        if (metadata.label) {
+          return metadata.label
+        }
+        // Если label не найден в metadata, извлекаем из metricType
+        const label = metricType
+          .replace('custom_care_', '')
+          .replace('custom_physical_', '')
+          .replace('custom_excretion_', '')
+          .replace('custom_symptom_', '')
+        return label || metricType
+      }
+      // Fallback: извлекаем label из metricType
+      const label = metricType
+        .replace('custom_care_', '')
+        .replace('custom_physical_', '')
+        .replace('custom_excretion_', '')
+        .replace('custom_symptom_', '')
+      return label || metricType
+    }
+
+    const labels: Record<string, string> = {
+      // Уход
+      walk: 'Прогулка',
+      cognitive_games: 'Когнитивные игры',
+      diaper_change: 'Смена подгузников',
+      hygiene: 'Гигиена',
+      skin_moisturizing: 'Увлажнение кожи',
+      meal: 'Прием пищи',
+      medications: 'Прием лекарств',
+      vitamins: 'Прием витаминов',
+      sleep: 'Сон',
+      // Физические
+      temperature: 'Температура',
+      blood_pressure: 'Давление',
+  pulse: 'Пульс',
+      breathing_rate: 'Частота дыхания',
+      pain_level: 'Уровень боли',
+      saturation: 'Сатурация',
+      blood_sugar: 'Уровень сахара в крови',
+      // Выделение
+      urination: 'Выпито/выделено и цвет мочи',
+      defecation: 'Дефекация',
+      // Симптомы
+      nausea: 'Тошнота',
+      vomiting: 'Рвота',
+      shortness_of_breath: 'Одышка',
+      itching: 'Зуд',
+      cough: 'Кашель',
+      dry_mouth: 'Сухость во рту',
+      hiccups: 'Икота',
+      taste_disturbance: 'Нарушение вкуса',
+    }
+    return labels[metricType] || metricType
+  }
+
+  // const scheduledItemsForDate = useMemo<
+  //   Array<{ metric: string; label: string; from: string; to: string; startMinutes: number }>
+  // >(() => {
+  //   if (!selectedDate) return []
+  //   const date = fromInputDate(selectedDate)
+  //   const jsDay = date.getDay()
+  //   const dayIndex = (jsDay + 6) % 7
+
+  //   const items: Array<{ metric: string; label: string; from: string; to: string; startMinutes: number }> = []
+  //   Object.entries(routeSchedules || {}).forEach(([metric, sched]) => {
+  //     if (!sched || !Array.isArray((sched as any).days)) return
+  //     if (!((sched as any).days as number[]).includes(dayIndex)) return
+  //     const times = Array.isArray((sched as any).times) ? (sched as any).times : []
+  //     times.forEach((r: any) => {
+  //       const from = (r && r.from) || r || '07:00'
+  //       const to = (r && r.to) || r || from
+  //       const startMinutes = timeStringToMinutes(from)
+  //       items.push({ metric, label: getMetricLabel(metric), from, to, startMinutes })
+  //     })
+  //   })
+  //   items.sort((a, b) => a.startMinutes - b.startMinutes)
+  //   return items
+  // }, [routeSchedules, selectedDate, metrics])
   const assignmentOrganizationType = useMemo(
     () =>
       organizationType ||
@@ -3293,68 +3481,6 @@ export const DiaryPage = () => {
     m => !m.is_pinned && getMetricCategory(m.metric_type) === 'symptom'
   )
 
-  const getMetricLabel = (metricType: string): string => {
-    // Проверяем, является ли это пользовательским показателем
-    // Если да, пытаемся получить label из metadata метрики
-    if (metricType.startsWith('custom_')) {
-      const metric = metrics.find(m => m.metric_type === metricType)
-      if (metric) {
-        const metadata = (metric as any).metadata || {}
-        if (metadata.label) {
-          return metadata.label
-        }
-        // Если label не найден в metadata, извлекаем из metricType
-        const label = metricType
-          .replace('custom_care_', '')
-          .replace('custom_physical_', '')
-          .replace('custom_excretion_', '')
-          .replace('custom_symptom_', '')
-        return label || metricType
-      }
-      // Fallback: извлекаем label из metricType
-      const label = metricType
-        .replace('custom_care_', '')
-        .replace('custom_physical_', '')
-        .replace('custom_excretion_', '')
-        .replace('custom_symptom_', '')
-      return label || metricType
-    }
-
-    const labels: Record<string, string> = {
-      // Уход
-      walk: 'Прогулка',
-      cognitive_games: 'Когнитивные игры',
-      diaper_change: 'Смена подгузников',
-      hygiene: 'Гигиена',
-      skin_moisturizing: 'Увлажнение кожи',
-      meal: 'Прием пищи',
-      medications: 'Прием лекарств',
-      vitamins: 'Прием витаминов',
-      sleep: 'Сон',
-      // Физические
-      temperature: 'Температура',
-      blood_pressure: 'Давление',
-  pulse: 'Пульс',
-      breathing_rate: 'Частота дыхания',
-      pain_level: 'Уровень боли',
-      saturation: 'Сатурация',
-      blood_sugar: 'Уровень сахара в крови',
-      // Выделение
-      urination: 'Выпито/выделено и цвет мочи',
-      defecation: 'Дефекация',
-      // Симптомы
-      nausea: 'Тошнота',
-      vomiting: 'Рвота',
-      shortness_of_breath: 'Одышка',
-      itching: 'Зуд',
-      cough: 'Кашель',
-      dry_mouth: 'Сухость во рту',
-      hiccups: 'Икота',
-      taste_disturbance: 'Нарушение вкуса',
-    }
-    return labels[metricType] || metricType
-  }
-
   // Получаем последнее значение показателя
   const getLastMetricValue = (metricType: string): string | null => {
     const values = metricValues
@@ -3572,7 +3698,7 @@ export const DiaryPage = () => {
     const base: Array<{ id: DiaryTab; label: string }> = [
       { id: 'diary', label: 'Дневник' },
       { id: 'history', label: 'История' },
-      { id: 'route', label: 'Маршрутный лист' },
+      // { id: 'route', label: 'Маршрутный лист' },
     ]
 
     if (isOrganization || (isOrgEmployee && employeePermissions.canManageClientAccess)) {
@@ -4689,6 +4815,43 @@ export const DiaryPage = () => {
               </div>
             )}
 
+            {/* Показания по расписанию (timeline) */}
+            {/* {scheduledItemsForDate && scheduledItemsForDate.length > 0 && (
+              <div className="bg-white rounded-3xl shadow-sm mb-4 overflow-hidden p-4">
+                <h2 className="text-xl font-bold text-gray-dark mb-3 text-center">Манипуляции на сегодня</h2>
+                <div className="max-w-md mx-auto">
+                  <div className="border rounded-lg overflow-hidden">
+                    {Array.from({ length: 14 }).map((_, idx) => {
+                      const hour = 7 + idx // 07..20
+                      const items = scheduledItemsForDate.filter(it => Math.floor(it.startMinutes / 60) === hour)
+                      return (
+                        <div key={hour} className="flex items-start gap-3 py-2 px-3 border-b last:border-b-0">
+                          <div className="w-16 text-sm text-gray-500">{String(hour).padStart(2, '0')}:00</div>
+                          <div className="flex-1 min-h-[40px]">
+                            {items.length === 0 ? (
+                              <div className="text-xs text-gray-300">&nbsp;</div>
+                            ) : (
+                              <div className="flex flex-col gap-2">
+                                {items.map(it => (
+                                  <div key={`${it.metric}_${it.from}`} className="inline-flex items-center justify-between bg-[#CFF6F8] text-[#0A6D83] rounded-md px-3 py-2 shadow-sm">
+                                    <div className="flex flex-col">
+                                      <div className="text-sm font-semibold">{it.label}</div>
+                                      <div className="text-xs text-[#0A6D83] opacity-80">{it.from}{it.from !== it.to ? ` — ${it.to}` : ''}</div>
+                                    </div>
+                                    <button onClick={() => handleRegularMetricClick(it.metric)} className="ml-3 text-xs text-white bg-[#2AA6B1] rounded-md px-2 py-1">Заполнить</button>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            )} */}
+
             {/* Все показатели */}
             <div className="mt-8">
               <h2 className="text-xl font-bold text-gray-dark mb-4">
@@ -5428,7 +5591,7 @@ export const DiaryPage = () => {
                     <div key={o.value} className="relative">
                       <button
                         onClick={() => toggleManipulation(o.value)}
-                        className={`w-full py-3 px-4 rounded-xl shadow-xl border border-[#25ACB7] text-sm font-medium text-center ${selectedManipulations.includes(o.value) ? 'bg-[#CFF6F8] border-[#0A6D83]' : 'bg-white border-gray-200'}`}
+                        className={`w-full py-3 px-4 rounded-xl shadow-sm border border-[#25ACB7] text-sm font-medium text-center ${selectedManipulations.includes(o.value) ? 'bg-[#CFF6F8] border-[#0A6D83]' : 'bg-white border-gray-200'}`}
                       >
                         {o.label}
                       </button>
@@ -5451,7 +5614,7 @@ export const DiaryPage = () => {
                     value={customMetricInput}
                     onChange={e => setCustomMetricInput(e.target.value)}
                     onKeyDown={handleCustomInputKeyDown}
-                    className="flex-1 rounded-xl border border-gray-200 px-6 py-4 text-lg text-gray-700 bg-white shadow-inner"
+                    className="flex-1 rounded-xl border border-gray-200 px-6 py-2.5 text-lg text-gray-700 bg-white shadow-inner"
                     placeholder="Добавить показатель"
                     aria-label="Добавить показатель"
                   />
@@ -5473,7 +5636,7 @@ export const DiaryPage = () => {
                       <div key={o.value} className="relative">
                         <button
                           onClick={() => toggleManipulation(o.value)}
-                          className={`w-full py-3 px-4 rounded-xl shadow-xl border border-[#25ACB7] text-sm font-medium text-center ${selectedManipulations.includes(o.value) ? 'bg-[#CFF6F8] border-[#0A6D83]' : 'bg-white border-gray-200'}`}
+                          className={`w-full py-3 px-4 rounded-xl shadow-sm border border-[#25ACB7] text-sm font-medium text-center ${selectedManipulations.includes(o.value) ? 'bg-[#CFF6F8] border-[#0A6D83]' : 'bg-white border-gray-200'}`}
                         >
                           {o.label}
                         </button>
@@ -5496,7 +5659,7 @@ export const DiaryPage = () => {
                       value={customPhysicalInput}
                       onChange={e => setCustomPhysicalInput(e.target.value)}
                       onKeyDown={handlePhysicalInputKeyDown}
-                      className="flex-1 rounded-xl border border-gray-200 px-6 py-4 text-lg text-gray-700 bg-white shadow-inner"
+                      className="flex-1 rounded-xl border border-gray-200 px-6 py-2.5 text-lg text-gray-700 bg-white shadow-inner"
                       placeholder="Добавить показатель"
                       aria-label="Добавить показатель"
                     />
@@ -5514,13 +5677,13 @@ export const DiaryPage = () => {
                 <div className="mt-6">
                   <div className="flex justify-center">
                     <button
-                      onClick={() => {
+                        onClick={() => {
                         if (!selectedManipulations || selectedManipulations.length === 0) {
                           alert('Выберите манипуляцию')
                           return
                         }
-                        const target = selectedManipulations[selectedManipulations.length - 1] || selectedManipulations[0]
-                        setManipulationToConfigure(target)
+                        // Open modal for all selected manipulations
+                        setManipulationToConfigure([...selectedManipulations])
                         setIsRoutePickerOpen(false)
                         setIsRouteManipulationConfigOpen(true)
                       }}

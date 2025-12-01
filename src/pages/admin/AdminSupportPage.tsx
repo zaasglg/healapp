@@ -962,7 +962,7 @@ export const AdminSupportPage = () => {
           <div className="bg-white rounded-3xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-hidden flex flex-col">
             <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between gap-4">
               <div>
-                <p className="text-xs uppercase text-gray-400 mb-1">Дневник подопечного</p>
+                <p className="text-xs uppercase text-gray-400 mb-1">Дневник здоровья</p>
                 <h2 className="text-xl font-semibold text-gray-800">{selectedDiary.patientName}</h2>
                 <div className="flex flex-wrap gap-2 mt-2 text-xs text-gray-500">
                   <span>Дневник создан: {formatDateTime(selectedDiary.createdAt)}</span>

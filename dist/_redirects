@@ -1,0 +1,15 @@
+# Netlify redirects для SPA
+# Все запросы перенаправляются на index.html для работы React Router
+/*    /index.html   200
+
+
+
+
+
+
+
+
+
+
+
+
