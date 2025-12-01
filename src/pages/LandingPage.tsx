@@ -387,7 +387,7 @@ export const LandingPage = () => {
                 </h2>
                 <p className="text-lg text-gray-700 font-sans mb-8 leading-relaxed">
                   Мы запускаем закрытое тестирование системы. 
-                  Напишите нам в WhatsApp, и мы отправим вам пригласительную ссылку для доступа к платформе.
+                  Напишите нам, и мы отправим вам пригласительную ссылку для доступа к платформе.
                 </p>
               </div>
 
@@ -418,7 +418,7 @@ export const LandingPage = () => {
               </a>
 
               <p className="mt-6 text-sm text-gray-600 font-sans">
-                Нажав на кнопку, вы перейдёте в WhatsApp для связи с нами
+                Нажав на кнопку, вы перейдёте в WhatsApp или Telegram для связи с нами
               </p>
             </Card>
           </div>
