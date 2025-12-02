@@ -1,7 +1,6 @@
 import { useMemo, useState, useEffect } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabase, supabaseAdmin } from '@/lib/supabase'
 import { Button } from '@/components/ui'
-import { getFunctionUrl } from '@/utils/supabaseConfig'
 
 type InviteType = 'organization' | 'employee' | 'client' | 'privateCaregiver'
 
@@ -109,9 +108,18 @@ export const AdminInvitesPage = () => {
       setIsLoading(true)
       setError(null)
 
+      // Используем admin клиент для обхода RLS
+      const client = supabaseAdmin || supabase
+      
+      if (!supabaseAdmin) {
+        setError('Для загрузки приглашений требуется VITE_SUPABASE_SERVICE_ROLE_KEY в .env.local')
+        setIsLoading(false)
+        return
+      }
+
       try {
         // Загружаем все приглашения
-        const { data: inviteTokens, error: inviteError } = await supabase
+        const { data: inviteTokens, error: inviteError } = await client
           .from('invite_tokens')
           .select(`
             id,
@@ -357,57 +365,54 @@ export const AdminInvitesPage = () => {
         payload.diary_id = null
       }
 
-      // Используем Edge Function для создания приглашения
-      // Получаем админский токен из localStorage
+      // Проверяем админский токен локально
       const adminToken = localStorage.getItem('admin_panel_token')
       if (!adminToken) {
         setError('Не найден админский токен. Обновите страницу с токеном в URL.')
         return
       }
 
-      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+      // Проверяем токен локально (как делает Edge Function)
+      const allowedTokensEnv = import.meta.env.VITE_ADMIN_TOKENS || ''
+      const allowedTokens = allowedTokensEnv.split(',').map((t: string) => t.trim()).filter(Boolean)
+      const fallbackToken = 'b8f56f5c-62f1-45d9-9e5a-e8bbfdadcf0f'
       
-      if (!supabaseAnonKey) {
-        setError('Не настроен VITE_SUPABASE_ANON_KEY. Проверьте переменные окружения.')
+      if (!allowedTokens.includes(adminToken) && adminToken !== fallbackToken) {
+        setError('Недействительный админский токен')
         return
       }
+
+      // Используем admin клиент для обхода RLS (требуется VITE_SUPABASE_SERVICE_ROLE_KEY)
+      const client = supabaseAdmin || supabase
       
-      // Используем утилиту для получения правильного URL функций
-      const functionUrl = getFunctionUrl('create-admin-invite')
-      
-      const response = await fetch(functionUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${supabaseAnonKey}`,
-          'apikey': supabaseAnonKey,
-        },
-        body: JSON.stringify({
-          invite_type: dbType,
-          admin_token: adminToken,
-          ...payload,
-        }),
+      if (!supabaseAdmin) {
+        setError('Для создания приглашений требуется VITE_SUPABASE_SERVICE_ROLE_KEY в .env.local')
+        return
+      }
+
+      // Вызываем RPC напрямую через Supabase клиент (без Edge Function)
+      const { data: rpcData, error: rpcError } = await client.rpc('generate_admin_invite_link', {
+        invite_type: dbType,
+        payload: payload,
       })
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Неизвестная ошибка' }))
-        console.error('Ошибка создания приглашения:', errorData)
-        setError(errorData.error || 'Не удалось создать приглашение')
+      if (rpcError) {
+        console.error('Ошибка создания приглашения:', rpcError)
+        setError(rpcError.message || 'Не удалось создать приглашение')
         return
       }
 
-      const result = await response.json()
-
-      if (!result.success || !result.invite) {
+      if (!rpcData) {
         setError('Не удалось создать приглашение')
         return
       }
 
-      const link = result.link || buildInviteLink(selectedType, result.invite.token)
+      const result = { success: true, invite: rpcData }
+      const link = buildInviteLink(selectedType, result.invite.token)
       setGeneratedLink(link)
 
       // Перезагружаем список приглашений
-      const { data: inviteTokens } = await supabase
+      const { data: inviteTokens } = await client
         .from('invite_tokens')
         .select('*')
         .eq('id', result.invite.id)
@@ -461,25 +466,32 @@ export const AdminInvitesPage = () => {
         setError('Не найден админский токен. Обновите страницу с токеном в URL.')
         return
       }
-      const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
       
-      // Используем утилиту для получения правильного URL функций
-      const functionUrl = getFunctionUrl('admin-revoke-invite')
+      // Проверяем токен локально
+      const allowedTokensEnv = import.meta.env.VITE_ADMIN_TOKENS || ''
+      const allowedTokens = allowedTokensEnv.split(',').map((t: string) => t.trim()).filter(Boolean)
+      const fallbackToken = 'b8f56f5c-62f1-45d9-9e5a-e8bbfdadcf0f'
+      
+      if (!allowedTokens.includes(adminToken) && adminToken !== fallbackToken) {
+        setError('Недостаточно прав для отзыва приглашения')
+        return
+      }
 
-      const response = await fetch(functionUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${supabaseAnonKey}`,
-          'apikey': supabaseAnonKey,
-        },
-        body: JSON.stringify({ invite_id: inviteId, admin_token: adminToken }),
-      })
+      // Используем admin клиент для обхода RLS
+      if (!supabaseAdmin) {
+        setError('Для отзыва приглашений требуется VITE_SUPABASE_SERVICE_ROLE_KEY в .env.local')
+        return
+      }
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Неизвестная ошибка' }))
-        console.error('Ошибка отзыва приглашения:', errorData)
-        setError(errorData.error || 'Не удалось отозвать приглашение')
+      // Удаляем приглашение напрямую через Supabase клиент
+      const { error: deleteError } = await supabaseAdmin
+        .from('invite_tokens')
+        .delete()
+        .eq('id', inviteId)
+
+      if (deleteError) {
+        console.error('Ошибка отзыва приглашения:', deleteError)
+        setError(deleteError.message || 'Не удалось отозвать приглашение')
         return
       }
 

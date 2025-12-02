@@ -4,6 +4,17 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAuthStore } from '@/store/authStore'
 import { supabase } from '@/lib/supabase'
+import {
+  loadRouteSchedulesForDiary,
+  saveRouteTemplate,
+  fetchRouteForDate,
+  createRouteEvent,
+  fetchRouteTemplates,
+  type RouteSlotForDate,
+  type RouteEventStatus,
+  type LocalRouteSchedule,
+  type RouteTemplate,
+} from '@/lib/routeService'
 import { Button, Input } from '@/components/ui'
 import { PinnedMetricPanel } from '@/components/PinnedMetricPanel'
 import type { MetricFillData } from '@/components/MetricFillModal'
@@ -996,6 +1007,7 @@ export const DiaryPage = () => {
   const [panelMetric, setPanelMetric] = useState<string | null>(null)
   const [panelVisible, setPanelVisible] = useState(false)
   const [isRoutePickerOpen, setIsRoutePickerOpen] = useState(false)
+  const [isRouteEditModalOpen, setIsRouteEditModalOpen] = useState(false)
   const [selectedManipulations, setSelectedManipulations] = useState<string[]>([])
 
   const toggleManipulation = (key: string) => {
@@ -1085,46 +1097,76 @@ export const DiaryPage = () => {
   // Route manipulation configuration modal state
   const [isRouteManipulationConfigOpen, setIsRouteManipulationConfigOpen] = useState(false)
   const [manipulationToConfigure, setManipulationToConfigure] = useState<string | string[] | null>(null)
-  const [routeSchedules, setRouteSchedules] = useState<Record<string, { days: number[]; times: { from: string; to: string }[] }>>({})
+  const [routeSchedules, setRouteSchedules] = useState<Record<string, LocalRouteSchedule>>({})
+  const [routeSlotsForDate, setRouteSlotsForDate] = useState<RouteSlotForDate[]>([])
+  const [routeTemplates, setRouteTemplates] = useState<RouteTemplate[]>([])
+  const [isLoadingTemplates, setIsLoadingTemplates] = useState(false)
 
-  const handleSaveRouteManipulation = (metric: string, payload: { days: number[]; times: { from: string; to: string }[] }) => {
+  const handleSaveRouteManipulation = async (metric: string, payload: { days: number[]; times: { from: string; to: string }[] }) => {
+    // Сохраняем в Supabase
+    if (id && userId) {
+      const title = getMetricLabel(metric)
+      const result = await saveRouteTemplate(
+        id,
+        metric,
+        title,
+        payload.days,
+        payload.times,
+        userId,
+        finalEffectiveOrganizationId || null
+      )
+      if (result) {
+        console.log('[DiaryPage] route schedule saved to DB:', metric, result)
+      } else {
+        console.warn('[DiaryPage] Failed to save route schedule to DB, falling back to localStorage')
+      }
+    }
+    // Обновляем локальное состояние
     setRouteSchedules(prev => {
       const next = { ...prev, [metric]: payload }
-      try {
-        localStorage.setItem('routeSchedules', JSON.stringify(next))
-      } catch (e) {
-        console.warn('[DiaryPage] Failed to persist routeSchedules to localStorage', e)
-      }
       return next
     })
-    console.log('[DiaryPage] route schedule saved:', metric, payload)
+    console.log('[DiaryPage] route schedule updated:', metric, payload)
   }
 
-  // Load persisted schedules from localStorage on mount
+  // Load route schedules from Supabase on mount and when diary changes
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('routeSchedules')
-      if (!raw) return
-      const parsed = JSON.parse(raw)
-      if (!parsed || typeof parsed !== 'object') return
-      const normalized: Record<string, { days: number[]; times: { from: string; to: string }[] }> = {}
-      Object.entries(parsed).forEach(([k, v]: any) => {
-        const days = Array.isArray(v.days) ? v.days.filter((d: any) => typeof d === 'number') : []
-        const timesArr = Array.isArray(v.times) ? v.times : []
-        const times = timesArr.map((t: any) => {
-          if (!t) return { from: '07:00', to: '07:00' }
-          if (typeof t === 'string') return { from: t, to: t }
-          if (typeof t === 'object' && ('from' in t || 'to' in t)) return { from: t.from || '07:00', to: t.to || t.from || '07:00' }
-          return { from: '07:00', to: '07:00' }
-        })
-        normalized[k] = { days, times }
-      })
-      setRouteSchedules(normalized)
-      console.log('[DiaryPage] Loaded routeSchedules from localStorage', normalized)
-    } catch (e) {
-      console.warn('[DiaryPage] Failed to load routeSchedules from localStorage', e)
+    if (!id) return
+
+    const loadSchedules = async () => {
+      try {
+        const schedules = await loadRouteSchedulesForDiary(id)
+        setRouteSchedules(schedules)
+        console.log('[DiaryPage] Loaded routeSchedules from Supabase', schedules)
+      } catch (e) {
+        console.warn('[DiaryPage] Failed to load routeSchedules from Supabase', e)
+      }
     }
-  }, [])
+
+    loadSchedules()
+  }, [id])
+
+  // Load route templates when edit modal opens
+  useEffect(() => {
+    if (!isRouteEditModalOpen || !id) return
+
+    const loadTemplates = async () => {
+      setIsLoadingTemplates(true)
+      try {
+        const templates = await fetchRouteTemplates(id)
+        setRouteTemplates(templates)
+        console.log('[DiaryPage] Loaded route templates:', templates)
+      } catch (e) {
+        console.warn('[DiaryPage] Failed to load route templates', e)
+      } finally {
+        setIsLoadingTemplates(false)
+      }
+    }
+
+    loadTemplates()
+  }, [id, isRouteEditModalOpen])
+
+  // Note: Load route slots for selected date effect is placed after selectedDate state declaration
 
   // Inline modal component for configuring a selected manipulation (days + times)
   const RouteManipulationModal = ({
@@ -1310,6 +1352,25 @@ export const DiaryPage = () => {
   const [isCalendarOpen, setIsCalendarOpen] = useState(false)
   const [calendarMonth, setCalendarMonth] = useState<Date>(() => fromInputDate(defaultHistoryDate))
   const calendarRef = useRef<HTMLDivElement | null>(null)
+
+  // Load route slots for selected date (with status information)
+  // This effect is placed here because it depends on selectedDate which is declared above
+  useEffect(() => {
+    if (!id || !selectedDate) return
+
+    const loadSlotsForDate = async () => {
+      try {
+        const slots = await fetchRouteForDate(id, selectedDate)
+        setRouteSlotsForDate(slots)
+        console.log('[DiaryPage] Loaded routeSlotsForDate from Supabase', slots)
+      } catch (e) {
+        console.warn('[DiaryPage] Failed to load routeSlotsForDate', e)
+      }
+    }
+
+    loadSlotsForDate()
+  }, [id, selectedDate])
+
   const [organizationClientLink, setOrganizationClientLink] = useState<DiaryClientLink | null>(null)
   const [attachedClient, setAttachedClient] = useState<ClientProfile | null>(null)
   const [externalAccessLinks, setExternalAccessLinks] = useState<Array<{ 
@@ -1388,29 +1449,68 @@ export const DiaryPage = () => {
     return labels[metricType] || metricType
   }
 
-  // const scheduledItemsForDate = useMemo<
-  //   Array<{ metric: string; label: string; from: string; to: string; startMinutes: number }>
-  // >(() => {
-  //   if (!selectedDate) return []
-  //   const date = fromInputDate(selectedDate)
-  //   const jsDay = date.getDay()
-  //   const dayIndex = (jsDay + 6) % 7
+  // Тип для элемента расписания с информацией о статусе
+  type ScheduledItem = {
+    metric: string
+    label: string
+    from: string
+    to: string
+    startMinutes: number
+    // Данные из БД (если доступны)
+    slotId?: string
+    templateId?: string
+    status?: RouteEventStatus | null
+    eventId?: string | null
+    performedBy?: string | null
+    performedAt?: string | null
+    reason?: string | null
+    comment?: string | null
+    assignedEmployeeId?: string | null
+  }
 
-  //   const items: Array<{ metric: string; label: string; from: string; to: string; startMinutes: number }> = []
-  //   Object.entries(routeSchedules || {}).forEach(([metric, sched]) => {
-  //     if (!sched || !Array.isArray((sched as any).days)) return
-  //     if (!((sched as any).days as number[]).includes(dayIndex)) return
-  //     const times = Array.isArray((sched as any).times) ? (sched as any).times : []
-  //     times.forEach((r: any) => {
-  //       const from = (r && r.from) || r || '07:00'
-  //       const to = (r && r.to) || r || from
-  //       const startMinutes = timeStringToMinutes(from)
-  //       items.push({ metric, label: getMetricLabel(metric), from, to, startMinutes })
-  //     })
-  //   })
-  //   items.sort((a, b) => a.startMinutes - b.startMinutes)
-  //   return items
-  // }, [routeSchedules, selectedDate, metrics])
+  const scheduledItemsForDate = useMemo<ScheduledItem[]>(() => {
+    if (!selectedDate) return []
+
+    // Если есть данные из БД (routeSlotsForDate), используем их
+    if (routeSlotsForDate.length > 0) {
+      return routeSlotsForDate.map((slot) => ({
+        metric: slot.metric_type || slot.title,
+        label: slot.title || getMetricLabel(slot.metric_type || ''),
+        from: slot.from_time,
+        to: slot.to_time,
+        startMinutes: timeStringToMinutes(slot.from_time),
+        slotId: slot.slot_id,
+        templateId: slot.template_id,
+        status: slot.status,
+        eventId: slot.event_id,
+        performedBy: slot.performed_by,
+        performedAt: slot.performed_at,
+        reason: slot.reason,
+        comment: slot.comment,
+        assignedEmployeeId: slot.assigned_employee_id,
+      }))
+    }
+
+    // Fallback: используем локальные данные из routeSchedules
+    const date = fromInputDate(selectedDate)
+    const jsDay = date.getDay()
+    const dayIndex = (jsDay + 6) % 7
+
+    const items: ScheduledItem[] = []
+    Object.entries(routeSchedules || {}).forEach(([metric, sched]) => {
+      if (!sched || !Array.isArray((sched as any).days)) return
+      if (!((sched as any).days as number[]).includes(dayIndex)) return
+      const times = Array.isArray((sched as any).times) ? (sched as any).times : []
+      times.forEach((r: any) => {
+        const from = (r && r.from) || r || '07:00'
+        const to = (r && r.to) || r || from
+        const startMinutes = timeStringToMinutes(from)
+        items.push({ metric, label: getMetricLabel(metric), from, to, startMinutes })
+      })
+    })
+    items.sort((a, b) => a.startMinutes - b.startMinutes)
+    return items
+  }, [routeSchedules, routeSlotsForDate, selectedDate, metrics])
   const assignmentOrganizationType = useMemo(
     () =>
       organizationType ||
@@ -3698,7 +3798,7 @@ export const DiaryPage = () => {
     const base: Array<{ id: DiaryTab; label: string }> = [
       { id: 'diary', label: 'Дневник' },
       { id: 'history', label: 'История' },
-      // { id: 'route', label: 'Маршрутный лист' },
+      { id: 'route', label: 'Маршрутный лист' },
     ]
 
     if (isOrganization || (isOrgEmployee && employeePermissions.canManageClientAccess)) {
@@ -3844,6 +3944,177 @@ export const DiaryPage = () => {
       label: getMetricLabel(metricType),
     })
     setIsMetricModalOpen(true)
+  }
+
+  // Timeline action modal state (open when clicking "Заполнить" in the timeline)
+  const [isActionModalOpen, setIsActionModalOpen] = useState(false)
+  const [actionMetric, setActionMetric] = useState<{ type: string; label: string } | null>(null)
+  // Current slot being acted upon (from routeSlotsForDate)
+  const [actionSlot, setActionSlot] = useState<{
+    slotId?: string
+    templateId?: string
+    from: string
+    to: string
+  } | null>(null)
+
+  // Confirm-done modal state (asks "Было / Не было")
+  const [isDoneConfirmOpen, setIsDoneConfirmOpen] = useState(false)
+
+  // Reschedule reason modal state
+  const [isRescheduleModalOpen, setIsRescheduleModalOpen] = useState(false)
+  const [rescheduleReason, setRescheduleReason] = useState('')
+  // Cancel reason modal state
+  const [isCancelModalOpen, setIsCancelModalOpen] = useState(false)
+  const [cancelReason, setCancelReason] = useState('')
+
+  const openActionModal = (metricType: string, slotInfo?: { slotId?: string; templateId?: string; from: string; to: string }) => {
+    if (!canFillMetrics) return
+    setActionMetric({ type: metricType, label: getMetricLabel(metricType) })
+    setActionSlot(slotInfo || null)
+    setIsActionModalOpen(true)
+  }
+
+  const closeActionModal = () => {
+    setIsActionModalOpen(false)
+    setActionMetric(null)
+    setActionSlot(null)
+  }
+
+  const actionMarkDone = async () => {
+    if (!actionMetric) return
+    // Instead of saving immediately, ask user to confirm whether the task actually took place
+    // (shows modal with "Было" / "Не было").
+    setIsActionModalOpen(false)
+    setIsDoneConfirmOpen(true)
+  }
+
+  // Helper function to save route event to DB
+  const saveRouteEventToDB = async (status: RouteEventStatus, reason?: string, comment?: string) => {
+    if (!actionSlot?.slotId || !actionSlot?.templateId || !id || !userId || !selectedDate) {
+      console.warn('[DiaryPage] Cannot save route event: missing slot/template/diary info')
+      return false
+    }
+
+    const event = await createRouteEvent({
+      templateId: actionSlot.templateId,
+      slotId: actionSlot.slotId,
+      eventDate: selectedDate,
+      eventFrom: actionSlot.from,
+      eventTo: actionSlot.to,
+      status,
+      performedBy: userId,
+      reason: reason || null,
+      comment: comment || null,
+      createdBy: userId,
+    })
+
+    if (event) {
+      console.log('[DiaryPage] Route event saved to DB:', event)
+      // Refresh slots for date to update UI
+      const slots = await fetchRouteForDate(id, selectedDate)
+      setRouteSlotsForDate(slots)
+      return true
+    }
+    return false
+  }
+
+  const handleConfirmDoneYes = async () => {
+    if (!actionMetric) return
+    try {
+      // Save route event to DB if we have slot info
+      if (actionSlot?.slotId) {
+        await saveRouteEventToDB('done')
+      }
+      // Also save to diary metrics history
+      await handleSaveRegularMetric(actionMetric.type, true)
+    } finally {
+      setIsDoneConfirmOpen(false)
+      setActionMetric(null)
+      setActionSlot(null)
+    }
+  }
+
+  const handleConfirmDoneNo = async () => {
+    if (!actionMetric) return
+    try {
+      // Save route event to DB if we have slot info
+      if (actionSlot?.slotId) {
+        await saveRouteEventToDB('not_done', 'Отмечено как не выполнено')
+      }
+      // Also save to diary metrics history
+      await handleSaveRegularMetric(actionMetric.type, false)
+    } finally {
+      setIsDoneConfirmOpen(false)
+      setActionMetric(null)
+      setActionSlot(null)
+    }
+  }
+
+  const actionMarkNotDone = () => {
+    if (!actionMetric) return
+    // Open cancel reason modal instead of immediately saving
+    setIsActionModalOpen(false)
+    setIsCancelModalOpen(true)
+  }
+
+  const handleSaveCancelReason = async () => {
+    if (!actionMetric) return
+    try {
+      // Save route event to DB with reason
+      if (actionSlot?.slotId) {
+        await saveRouteEventToDB('not_done', cancelReason || 'Не указана причина')
+      }
+    } catch (e) {
+      console.warn('[DiaryPage] Failed to save cancel event to DB', e)
+    }
+
+    // Save metric as not done
+    await handleSaveRegularMetric(actionMetric.type, false)
+    setIsCancelModalOpen(false)
+    setCancelReason('')
+    setActionMetric(null)
+    setActionSlot(null)
+  }
+
+  const handleCancelCancelModal = () => {
+    setIsCancelModalOpen(false)
+    setCancelReason('')
+    setActionMetric(null)
+    setActionSlot(null)
+  }
+
+  const actionReschedule = () => {
+    if (!actionMetric) return
+    // Close action modal and open reschedule-reason modal first
+    setIsActionModalOpen(false)
+    setIsRescheduleModalOpen(true)
+  }
+
+  const handleSaveRescheduleReason = async () => {
+    if (!actionMetric) return
+    try {
+      // Save reschedule event to DB with reason
+      if (actionSlot?.slotId) {
+        await saveRouteEventToDB('rescheduled', rescheduleReason || 'Не указана причина')
+      }
+    } catch (e) {
+      console.warn('[DiaryPage] Failed to save reschedule event to DB', e)
+    }
+
+    // open route manipulation modal for this metric to let user reschedule
+    setIsRescheduleModalOpen(false)
+    setManipulationToConfigure(actionMetric.type)
+    setIsRouteManipulationConfigOpen(true)
+    setRescheduleReason('')
+    setActionMetric(null)
+    setActionSlot(null)
+  }
+
+  const handleCancelReschedule = () => {
+    setIsRescheduleModalOpen(false)
+    setRescheduleReason('')
+    setActionMetric(null)
+    setActionSlot(null)
   }
 
   const handleSaveRegularMetric = async (metricType: string, value: string | number | boolean) => {
@@ -4815,43 +5086,6 @@ export const DiaryPage = () => {
               </div>
             )}
 
-            {/* Показания по расписанию (timeline) */}
-            {/* {scheduledItemsForDate && scheduledItemsForDate.length > 0 && (
-              <div className="bg-white rounded-3xl shadow-sm mb-4 overflow-hidden p-4">
-                <h2 className="text-xl font-bold text-gray-dark mb-3 text-center">Манипуляции на сегодня</h2>
-                <div className="max-w-md mx-auto">
-                  <div className="border rounded-lg overflow-hidden">
-                    {Array.from({ length: 14 }).map((_, idx) => {
-                      const hour = 7 + idx // 07..20
-                      const items = scheduledItemsForDate.filter(it => Math.floor(it.startMinutes / 60) === hour)
-                      return (
-                        <div key={hour} className="flex items-start gap-3 py-2 px-3 border-b last:border-b-0">
-                          <div className="w-16 text-sm text-gray-500">{String(hour).padStart(2, '0')}:00</div>
-                          <div className="flex-1 min-h-[40px]">
-                            {items.length === 0 ? (
-                              <div className="text-xs text-gray-300">&nbsp;</div>
-                            ) : (
-                              <div className="flex flex-col gap-2">
-                                {items.map(it => (
-                                  <div key={`${it.metric}_${it.from}`} className="inline-flex items-center justify-between bg-[#CFF6F8] text-[#0A6D83] rounded-md px-3 py-2 shadow-sm">
-                                    <div className="flex flex-col">
-                                      <div className="text-sm font-semibold">{it.label}</div>
-                                      <div className="text-xs text-[#0A6D83] opacity-80">{it.from}{it.from !== it.to ? ` — ${it.to}` : ''}</div>
-                                    </div>
-                                    <button onClick={() => handleRegularMetricClick(it.metric)} className="ml-3 text-xs text-white bg-[#2AA6B1] rounded-md px-2 py-1">Заполнить</button>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                </div>
-              </div>
-            )} */}
-
             {/* Все показатели */}
             <div className="mt-8">
               <h2 className="text-xl font-bold text-gray-dark mb-4">
@@ -5521,40 +5755,134 @@ export const DiaryPage = () => {
 
         {activeTab === 'route' && (
           <div className="space-y-6">
-            {/* Информационная карточка */}
-            <div className="bg-white rounded-[20px] shadow-[0_12px_30px_rgba(9,109,131,0.06)] px-6 py-5">
-              <p className="text-sm text-[#4A4A4A] leading-relaxed">
-                Маршрутный лист показывает, какие манипуляции нужно выполнять с подопечным, когда и с какой периодичностью
-                (ежедневно, раз в неделю). Можно составить вручную или воспользоваться ИИ, который предложит готовый вариант
-                на основе дневника динамики ухода. С маршрутным листом легко согласовать, изменить и отслеживать выполнение всех процедур.
-              </p>
-            </div>
+            {/* Информационная карточка - показывать только если нет данных */}
+            {(!scheduledItemsForDate || scheduledItemsForDate.length === 0) && (
+              <div className="bg-white rounded-[20px] shadow-[0_12px_30px_rgba(9,109,131,0.06)] px-6 py-5">
+                <p className="text-sm text-[#4A4A4A] leading-relaxed">
+                  Маршрутный лист показывает, какие манипуляции нужно выполнять с подопечным, когда и с какой периодичностью
+                  (ежедневно, раз в неделю). Можно составить вручную или воспользоваться ИИ, который предложит готовый вариант
+                  на основе дневника динамики ухода. С маршрутным листом легко согласовать, изменить и отслеживать выполнение всех процедур.
+                </p>
+              </div>
+            )}
 
             {/* Заголовок секции */}
             <h2 className="text-2xl font-bold text-gray-dark">Настроить маршрутный лист</h2>
 
-            {/* Панель добавления маршрутов */}
-            <div className="bg-white rounded-2xl shadow-sm p-6">
-              <p className="text-base text-gray-700 mb-6">Добавьте манипуляции вручную или с помощью ИИ</p>
+            {/* Показания по расписанию (timeline) */}
+            {scheduledItemsForDate && scheduledItemsForDate.length > 0 && (
+              <div className="bg-white rounded-3xl shadow-sm mb-4 overflow-hidden p-4">
+                <h2 className="text-xl font-bold text-gray-dark mb-3 text-center">Манипуляции на сегодня</h2>
+                <div className="max-w-md mx-auto">
+                  <div className="border rounded-lg overflow-hidden">
+                    {Array.from({ length: 14 }).map((_, idx) => {
+                      const hour = 7 + idx // 07..20
+                      const items = scheduledItemsForDate.filter(it => Math.floor(it.startMinutes / 60) === hour)
+                      return (
+                        <div key={hour} className="flex items-start gap-3 py-2 px-3 border-b last:border-b-0">
+                          <div className="w-16 text-sm text-gray-500">{String(hour).padStart(2, '0')}:00</div>
+                          <div className="flex-1 min-h-[40px]">
+                            {items.length === 0 ? (
+                              <div className="text-xs text-gray-300">&nbsp;</div>
+                            ) : (
+                              <div className="flex flex-col gap-2">
+                                {items.map(it => {
+                                  // Определяем стили и текст кнопки в зависимости от статуса
+                                  const getStatusStyles = () => {
+                                    if (!it.status) return { bg: 'bg-[#CFF6F8]', text: 'text-[#0A6D83]', btnBg: 'bg-[#2AA6B1]', btnText: 'Заполнить' }
+                                    switch (it.status) {
+                                      case 'done':
+                                        return { bg: 'bg-green-100', text: 'text-green-800', btnBg: 'bg-green-600', btnText: '✓ Выполнено' }
+                                      case 'not_done':
+                                        return { bg: 'bg-red-100', text: 'text-red-800', btnBg: 'bg-red-500', btnText: '✗ Не выполнено' }
+                                      case 'rescheduled':
+                                        return { bg: 'bg-yellow-100', text: 'text-yellow-800', btnBg: 'bg-yellow-600', btnText: '↻ Перенесено' }
+                                      case 'cancelled':
+                                        return { bg: 'bg-gray-200', text: 'text-gray-600', btnBg: 'bg-gray-500', btnText: 'Отменено' }
+                                      case 'missed':
+                                        return { bg: 'bg-orange-100', text: 'text-orange-800', btnBg: 'bg-orange-500', btnText: 'Просрочено' }
+                                      default:
+                                        return { bg: 'bg-[#CFF6F8]', text: 'text-[#0A6D83]', btnBg: 'bg-[#2AA6B1]', btnText: 'Заполнить' }
+                                    }
+                                  }
+                                  const styles = getStatusStyles()
+                                  const isCompleted = it.status === 'done' || it.status === 'not_done' || it.status === 'cancelled'
 
-              <div className="flex flex-col items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => setIsRoutePickerOpen(true)}
-                  className="px-6 py-2 rounded-full bg-[#4A4A4A] text-white text-sm font-semibold shadow-sm hover:opacity-90"
-                >
-                  Добавить
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setIsRoutePickerOpen(true)}
-                  className="px-6 py-2 rounded-full bg-gradient-to-r from-[#0A6D83] to-[#2A9DB0] text-white text-sm font-semibold shadow-sm hover:opacity-90"
-                >
-                  Добавить с ИИ
-                </button>
+                                  return (
+                                    <div key={`${it.metric}_${it.from}`} className={`inline-flex items-center justify-between ${styles.bg} ${styles.text} rounded-md px-3 py-2 shadow-sm`}>
+                                      <div className="flex flex-col">
+                                        <div className="text-sm font-semibold">{it.label}</div>
+                                        <div className={`text-xs ${styles.text} opacity-80`}>{it.from}{it.from !== it.to ? ` — ${it.to}` : ''}</div>
+                                        {it.reason && (
+                                          <div className={`text-xs ${styles.text} opacity-70 mt-1`}>Причина: {it.reason}</div>
+                                        )}
+                                      </div>
+                                      {!isCompleted ? (
+                                        <button
+                                          onClick={() => openActionModal(it.metric, {
+                                            slotId: it.slotId,
+                                            templateId: it.templateId,
+                                            from: it.from,
+                                            to: it.to,
+                                          })}
+                                          className={`ml-3 text-xs text-white ${styles.btnBg} rounded-md px-2 py-1`}
+                                        >
+                                          {styles.btnText}
+                                        </button>
+                                      ) : (
+                                        <span className={`ml-3 text-xs ${styles.btnBg} text-white rounded-md px-2 py-1`}>
+                                          {styles.btnText}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+                
+                {/* Кнопка "Изменить" внизу секции */}
+                <div className="mt-4 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => setIsRouteEditModalOpen(true)}
+                    className="px-8 py-2.5 rounded-full bg-[#4A4A4A] text-white text-sm font-semibold shadow-sm hover:opacity-90 transition-opacity"
+                  >
+                    Изменить
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* Панель добавления маршрутов - показывать только если нет данных */}
+            {(!scheduledItemsForDate || scheduledItemsForDate.length === 0) && (
+              <div className="bg-white rounded-2xl shadow-sm p-6">
+                <p className="text-base text-gray-700 mb-6">Добавьте манипуляции вручную или с помощью ИИ</p>
+
+                <div className="flex flex-col items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsRoutePickerOpen(true)}
+                    className="px-6 py-2 rounded-full bg-[#4A4A4A] text-white text-sm font-semibold shadow-sm hover:opacity-90"
+                  >
+                    Добавить
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsRoutePickerOpen(true)}
+                    className="px-6 py-2 rounded-full bg-gradient-to-r from-[#0A6D83] to-[#2A9DB0] text-white text-sm font-semibold shadow-sm hover:opacity-90"
+                  >
+                    Добавить с ИИ
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -5692,6 +6020,110 @@ export const DiaryPage = () => {
                       Выбрать
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Модальное окно редактирования манипуляций */}
+        {isRouteEditModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div
+              className="absolute inset-0 bg-black/40"
+              onClick={() => setIsRouteEditModalOpen(false)}
+            />
+
+            {/* Modal container */}
+            <div className="relative w-full max-w-md">
+              <div className="bg-white rounded-3xl shadow-lg p-6 max-h-[80vh] overflow-auto transform transition-transform duration-200 ease-out">
+
+                <div className="flex items-center justify-center mb-4 text-center relative">
+                  <h3 className="text-2xl font-black text-[#25ADB8]">Редактировать манипуляции</h3>
+                  <button
+                    onClick={() => setIsRouteEditModalOpen(false)}
+                    aria-label="Закрыть"
+                    className="text-2xl absolute right-0 text-gray-400 hover:text-gray-600"
+                  >
+                    ×
+                  </button>
+                </div>
+
+                <p className="text-sm text-gray-600 mb-6 text-center">
+                  Выберите манипуляцию для редактирования
+                </p>
+
+                <div className="space-y-4">
+                  {/* Список всех манипуляций из templates */}
+                  {isLoadingTemplates ? (
+                    <p className="text-sm text-gray-500 text-center py-8">
+                      Загрузка...
+                    </p>
+                  ) : routeTemplates.length === 0 ? (
+                    <p className="text-sm text-gray-500 text-center py-8">
+                      Нет настроенных манипуляций
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {routeTemplates.map((template) => {
+                        const metricType = template.metric_type || ''
+                        const schedule = routeSchedules[metricType]
+                          return (
+                            <button
+                              key={template.id}
+                              onClick={() => {
+                                setManipulationToConfigure([metricType])
+                                setIsRouteEditModalOpen(false)
+                                setIsRouteManipulationConfigOpen(true)
+                              }}
+                              className="w-full py-3 px-4 rounded-xl bg-white border-2 border-[#25ACB7] text-left hover:bg-[#CFF6F8] transition-colors"
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex-1">
+                                  <p className="text-sm font-semibold text-gray-800">
+                                    {template.title}
+                                  </p>
+                                  <p className="text-xs text-gray-500 mt-1">
+                                    {schedule ? `${schedule.days?.length || 0} дней, ${schedule.times?.length || 0} времён` : 'Не настроено'}
+                                  </p>
+                                </div>
+                                <svg
+                                  className="w-5 h-5 text-[#25ACB7]"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  viewBox="0 0 24 24"
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    strokeWidth={2}
+                                    d="M9 5l7 7-7 7"
+                                  />
+                                </svg>
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                </div>
+
+                <div className="mt-6 flex justify-center gap-3">
+                  <button
+                    onClick={() => setIsRouteEditModalOpen(false)}
+                    className="px-8 py-3 rounded-2xl bg-gray-200 text-[#4A4A4A] font-semibold"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIsRouteEditModalOpen(false)
+                      setIsRoutePickerOpen(true)
+                    }}
+                    className="px-8 py-3 rounded-2xl bg-[#4A4A4A] text-white font-semibold"
+                  >
+                    Добавить манипуляции
+                  </button>
                 </div>
               </div>
             </div>
@@ -6384,6 +6816,122 @@ export const DiaryPage = () => {
           onClose={() => setIsRouteManipulationConfigOpen(false)}
           onSave={handleSaveRouteManipulation}
         />
+      )}
+
+      {isActionModalOpen && actionMetric && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={closeActionModal} />
+          <div className="relative bg-white rounded-2xl w-80 max-w-full p-6 text-center shadow-lg">
+            <h3 className="text-2xl font-bold text-[#25ADB8] mb-2">{actionMetric.label}</h3>
+            <p className="text-sm text-gray-700 mb-4">Выберите действие</p>
+            <div className="space-y-3">
+              <button
+                onClick={actionMarkDone}
+                className="w-full py-2 rounded-md bg-[#2AA6B1] text-white font-semibold"
+              >
+                Задача выполнена
+              </button>
+
+              <button
+                onClick={actionReschedule}
+                className="w-full py-2 rounded-md bg-[#FB923C] text-white font-semibold"
+              >
+                Перенести задачу
+              </button>
+
+              <button
+                onClick={actionMarkNotDone}
+                className="w-full py-2 rounded-md bg-[#EF4444] text-white font-semibold"
+              >
+                Задача не выполнена
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isDoneConfirmOpen && actionMetric && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setIsDoneConfirmOpen(false)} />
+          <div className="relative bg-white rounded-2xl w-80 max-w-full p-6 text-center shadow-lg">
+            <h3 className="text-2xl font-bold text-[#25ADB8] mb-2">{actionMetric.label}</h3>
+            <p className="text-sm text-gray-700 mb-4">Отметьте, состоялась ли {actionMetric.label.toLowerCase()} у подопечного</p>
+            <div className="flex gap-3 justify-center">
+              <button
+                onClick={handleConfirmDoneYes}
+                className={`px-4 py-2 rounded-full bg-[#2AA6B1] text-white font-semibold`}
+              >
+                Было
+              </button>
+              <button
+                onClick={handleConfirmDoneNo}
+                className={`px-4 py-2 rounded-full bg-white border border-[#D1E8EA] text-gray-700 font-semibold`}
+              >
+                Не было
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isRescheduleModalOpen && actionMetric && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={handleCancelReschedule} />
+          <div className="relative bg-white rounded-2xl w-80 max-w-full p-6 text-center shadow-lg">
+            <h3 className="text-2xl font-bold text-[#25ADB8] mb-2">{actionMetric.label}</h3>
+            <p className="text-sm text-gray-700 mb-4">Напишите причину переноса манипуляции</p>
+            <textarea
+              value={rescheduleReason}
+              onChange={e => setRescheduleReason(e.target.value)}
+              placeholder="Напишите причину"
+              className="w-full mb-4 p-3 border rounded-md text-sm resize-none h-24"
+            />
+            <div className="flex gap-3 justify-center">
+              <button
+                onClick={handleSaveRescheduleReason}
+                className={`px-4 py-2 rounded-full bg-[#2AA6B1] text-white font-semibold`}
+              >
+                Сохранить
+              </button>
+              <button
+                onClick={handleCancelReschedule}
+                className={`px-4 py-2 rounded-full bg-white border border-[#D1E8EA] text-gray-700 font-semibold`}
+              >
+                Отмена
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isCancelModalOpen && actionMetric && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={handleCancelCancelModal} />
+          <div className="relative bg-white rounded-2xl w-80 max-w-full p-6 text-center shadow-lg">
+            <h3 className="text-2xl font-bold text-[#25ADB8] mb-2">{actionMetric.label}</h3>
+            <p className="text-sm text-gray-700 mb-4">Напишите причину отмены задачи</p>
+            <textarea
+              value={cancelReason}
+              onChange={e => setCancelReason(e.target.value)}
+              placeholder="Напишите причину"
+              className="w-full mb-4 p-3 border rounded-md text-sm resize-none h-24"
+            />
+            <div className="flex gap-3 justify-center">
+              <button
+                onClick={handleSaveCancelReason}
+                className={`px-4 py-2 rounded-full bg-[#2AA6B1] text-white font-semibold`}
+              >
+                Сохранить
+              </button>
+              <button
+                onClick={handleCancelCancelModal}
+                className={`px-4 py-2 rounded-full bg-white border border-[#D1E8EA] text-gray-700 font-semibold`}
+              >
+                Отмена
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Модальное окно для заполнения обычных показателей */}

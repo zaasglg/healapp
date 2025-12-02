@@ -11,7 +11,7 @@ import { Button, Input } from '@/components/ui'
 
 // Схема валидации для кода подтверждения
 const confirmationSchema = z.object({
-  code: z.string().min(8, 'Код должен содержать 8 символов').max(8, 'Код должен содержать 8 символов'),
+  code: z.string().min(6, 'Код должен содержать 8 символов').max(8, 'Код должен содержать 8 символов'),
 })
 
 type ConfirmationFormData = z.infer<typeof confirmationSchema>
