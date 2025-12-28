@@ -47,15 +47,6 @@ export const LandingPage = () => {
     }, 100);
   };
 
-  const handleWhatsAppClick = () => {
-    const phoneNumber = "79145391376";
-    const message = encodeURIComponent(
-      "Здравствуйте! Хочу записаться на закрытое тестирование Дневника подопечного.",
-    );
-    const whatsappUrl = `https://wa.me/${phoneNumber}?text=${message}`;
-    window.open(whatsappUrl, "_blank");
-  };
-
   return (
     <div className="min-h-screen bg-white">
       {/* Hero Section - 16:9 */}
